@@ -213,6 +213,9 @@ show_bars = st.sidebar.slider("Bars shown on chart", 40, 500, 150, 10, help="Few
 fit_y = st.sidebar.checkbox("Fit price axis to candles", value=True, help="Keeps candles full-size; far-away levels (stop, target) no longer squash the chart.")
 crosshair = st.sidebar.checkbox("Crosshair cursor lines", value=True, help="Dotted lines that follow the mouse across all panels, with price/time read-outs on the axes.")
 chart_drag = st.sidebar.selectbox("Mouse drag does", ["Pan", "Zoom box"], help="Mouse wheel always zooms. Double-click the chart to reset.")
+improved_rules = st.sidebar.checkbox("Improved entry & target rules", value=True,
+    help="Target = nearest of wall / Donchian edge / ATR reach for the forecast horizon (not always the far wall). Stop = 1.5 ATR beyond the wall (not 3%). "
+         "A fresh RSI divergence near a wall (within 3%) also counts as a reversal entry. Untick to use the old rules; the hit-rate section compares both.")
 active_cfg = tf_config[selected_tf]
 
 df_raw = load_chart_data(selected_ticker, active_cfg)
@@ -378,14 +381,19 @@ else:
         news_multiplier, "🟨 LIVE NEWS SENTIMENT: NEUTRAL FLOW" if news["ok"] else "🟨 NEWS UNAVAILABLE (neutral)")
 
 # ------------------------------------------------------------------ signal (one function, used live, in replay and in the history statistics)
-def decide(close, rsi, sup, res, sma, lma, zl, sd, md, news, atr):
-    """Previous decision rules (wall reversals + trend filter). Stops sit beyond the wall by max(3%, 1.5 ATR).
-    BOS / CHoCH marks are NOT used here."""
+def decide(close, rsi, sup, res, sma, lma, zl, sd, md, news, atr, dcl=np.nan, dcu=np.nan, divb=False, divs=False, H=15, improved=False):
+    """Wall reversals + trend filter. BOS / CHoCH marks are NOT used here.
+    improved=False: old rules (target = far wall, stop = wall -/+ max(3%, 1.5 ATR)).
+    improved=True : a fresh RSI divergence near a wall also triggers the entry; stop = wall -/+ 1.5 ATR (min 0.25% of price);
+                    target = nearest of {wall, Donchian edge, ATR reach for H bars}, so it is a level price can plausibly reach in time."""
     tag = None
-    if close <= sup * 1.015 and (rsi <= rsi_buy_floor or news > 1.0):
-        label, side, tp, sl = "BUY REVERSAL ENTRY", 1, res, sup - max(0.03 * sup, 1.5 * atr)
-    elif close >= res * 0.985 and (rsi >= rsi_sell_ceil or news < 1.0):
-        label, side, tp, sl = "SELL REVERSAL ENTRY", -1, sup, res + max(0.03 * res, 1.5 * atr)
+    stop_pad = lambda w: max(1.5 * atr, 0.0025 * w) if improved else max(0.03 * w, 1.5 * atr)
+    near_b = close <= sup * 1.015 or (improved and divb and close <= sup * 1.03)
+    near_s = close >= res * 0.985 or (improved and divs and close >= res * 0.97)
+    if near_b and (rsi <= rsi_buy_floor or news > 1.0 or (improved and divb)):
+        label, side, tp, sl = "BUY REVERSAL ENTRY", 1, res, sup - stop_pad(sup)
+    elif near_s and (rsi >= rsi_sell_ceil or news < 1.0 or (improved and divs)):
+        label, side, tp, sl = "SELL REVERSAL ENTRY", -1, sup, res + stop_pad(res)
     elif news > 1.0:
         label, side, tp, sl = "CONSOLIDATION - HOLD LONG", 1, res, sup
     elif news < 1.0:
@@ -398,6 +406,14 @@ def decide(close, rsi, sup, res, sma, lma, zl, sd, md, news, atr):
         label, side, tp, sl = "CONSOLIDATION - HOLD LONG", 1, res, sup
     else:
         label, side, tp, sl = "CONSOLIDATION - HOLD SHORT", -1, sup, res
+    if improved and np.isfinite(atr) and atr > 0:
+        reach = 1.5 * atr * np.sqrt(max(int(H), 1))
+        if side > 0:
+            cands = [tp, close + reach] + ([dcu] if np.isfinite(dcu) and dcu >= close + 0.5 * atr else [])
+            tp = min(c for c in cands if c > close) if any(c > close for c in cands) else tp
+        else:
+            cands = [tp, close - reach] + ([dcl] if np.isfinite(dcl) and dcl <= close - 0.5 * atr else [])
+            tp = max(c for c in cands if c < close) if any(c < close for c in cands) else tp
     adj = False   # target/stop on the wrong side of price (breakouts) -> ATR levels
     if side > 0:
         if tp <= close: tp, adj = close + 2 * atr, True
@@ -408,10 +424,16 @@ def decide(close, rsi, sup, res, sma, lma, zl, sd, md, news, atr):
     return label, side, tp, sl, adj, tag
 
 
+def _flag(v):
+    return bool(v) if pd.notna(v) else False
+
+
 trend_direction, side, predicted_price, stop_loss_price, levels_adjusted, _tag = decide(
     current_market_close, current_rsi, structural_support, structural_resistance,
     float(last["Short_MA"]), float(last["Long_MA"]), float(last["ZLEMA"]),
-    float(last["Short_Diff"]), float(last["Medium_Diff"]), news_multiplier, atr)
+    float(last["Short_Diff"]), float(last["Medium_Diff"]), news_multiplier, atr,
+    dcl=float(last["DC_Lower"]), dcu=float(last["DC_Upper"]), divb=_flag(last["DIV_bull"]), divs=_flag(last["DIV_bear"]),
+    H=forecast_lead_units, improved=improved_rules)
 if _tag == "UP":
     sentiment_label = "🟩 ALGO FILTER: TECHNICAL BREAKOUT UP"
 elif _tag == "DOWN":
@@ -590,6 +612,7 @@ fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.02, ro
 fig.add_trace(go.Candlestick(x=timeline_x, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Market History"), row=1, col=1)
 
 if replay_bars_back > 0 and not outcome_df.empty:
+    outcome_df = outcome_df.head(int(forecast_lead_units))   # draw only the forecast horizon, so history keeps its width
     outcome_x = list(outcome_df.index.strftime(fmt))
     total_axis_x = timeline_x + outcome_x
     fig.add_trace(go.Candlestick(x=outcome_x, open=outcome_df["Open"], high=outcome_df["High"], low=outcome_df["Low"],
@@ -734,7 +757,7 @@ for ln in _mine:
 if fit_y:
     _lo, _hi = float(df["Low"].min()), float(df["High"].max())
     if replay_bars_back > 0 and not outcome_df.empty:
-        _o = outcome_df.head(forecast_lead_units)
+        _o = outcome_df
         _lo, _hi = min(_lo, float(_o["Low"].min())), max(_hi, float(_o["High"].max()))
     _rng = max(_hi - _lo, 1e-9)
     _c_lo, _c_hi = _lo, _hi
@@ -846,15 +869,18 @@ if replay_bars_back > 0 and not outcome_df.empty:
         st.caption(f"Only {len(window)} of {forecast_lead_units} horizon bars exist after this anchor.")
 
 # ------------------------------------------------------------------ hit-rate over ALL history (one replay is an anecdote; this is the evidence)
-def batch_signal_stats(d, horizon):
+def batch_signal_stats(d, horizon, improved=False):
     cols = ["High", "Low", "Close", "Short_MA", "Long_MA", "ZLEMA", "Short_Diff", "Medium_Diff", "ATR", "RSI_14", "Wall_Res", "Wall_Sup"]
     a = {k: d[k].values for k in cols}
+    dcl_, dcu_ = d["DC_Lower"].values, d["DC_Upper"].values
+    dvb_, dvs_ = d["DIV_bull"].fillna(False).astype(bool).values, d["DIV_bear"].fillna(False).astype(bool).values
     recs = []
     for i in range(len(d) - horizon - 1):
         if any(np.isnan(a[k][i]) for k in cols):
             continue
         label, sd_, tp, sl, _, _ = decide(a["Close"][i], a["RSI_14"][i], a["Wall_Sup"][i], a["Wall_Res"][i], a["Short_MA"][i],
-                                          a["Long_MA"][i], a["ZLEMA"][i], a["Short_Diff"][i], a["Medium_Diff"][i], 1.0, a["ATR"][i])
+                                          a["Long_MA"][i], a["ZLEMA"][i], a["Short_Diff"][i], a["Medium_Diff"][i], 1.0, a["ATR"][i],
+                                          dcl=dcl_[i], dcu=dcu_[i], divb=dvb_[i], divs=dvs_[i], H=horizon, improved=improved)
         entry, exit_px, outcome = a["Close"][i], a["Close"][i + horizon], "timeout"
         for j in range(i + 1, i + horizon + 1):
             hit_sl = a["Low"][j] <= sl if sd_ > 0 else a["High"][j] >= sl
@@ -867,7 +893,7 @@ def batch_signal_stats(d, horizon):
     return pd.DataFrame(recs, columns=["i", "label", "outcome", "ret", "raw"])
 
 with st.expander(f"📊 Signal hit-rate over ALL history ({selected_tf}, {forecast_lead_units}-bar horizon, no news)", expanded=True):
-    bs = batch_signal_stats(all_df, forecast_lead_units)
+    bs = batch_signal_stats(all_df, forecast_lead_units, improved_rules)
     if bs.empty:
         st.info("Not enough history.")
     else:
@@ -890,6 +916,21 @@ with st.expander(f"📊 Signal hit-rate over ALL history ({selected_tf}, {foreca
         st.caption("Entry at the signal bar's close; stop assumed first if both touched in one bar; no news (history unavailable). "
                    "Consecutive signals overlap, so treat counts as indicative. If 'Win rate' is not clearly above 50% and 'Avg return' "
                    "is not clearly positive and above the always-long baseline, this rule has no edge on this ticker/timeframe.")
+        st.markdown("**Old rules vs improved rules - reversal entries only (same data, same horizon)**")
+        _rows = {}
+        for _nm, _flagv in (("Old rules", False), ("Improved rules", True)):
+            _b = batch_signal_stats(all_df, forecast_lead_units, _flagv)
+            _e = _b[_b.label.str.contains("ENTRY")]
+            if _e.empty:
+                continue
+            _cut = _b.i.min() + int((_b.i.max() - _b.i.min()) * 0.6)
+            for _part, _g in (("all", _e), ("OUT-OF-SAMPLE (last 40%)", _e[_e.i > _cut])):
+                if len(_g):
+                    _rows[f"{_nm} - {_part}"] = summarize(_g)
+        if _rows:
+            st.table(pd.DataFrame(_rows).T)
+            st.caption("Pick the rule set whose OUT-OF-SAMPLE row has the higher win rate AND higher average return with a reasonable number of signals (30+). "
+                       "Fewer than ~30 signals means the difference is noise.")
 
 # ------------------------------------------------------------------ real paper portfolio + real rule backtest
 st.markdown("### 💼 Paper Portfolio (from local_sandbox_portfolio.json)")
