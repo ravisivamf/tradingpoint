@@ -45,7 +45,6 @@ from indicators import (auto_edge_donchian, compute_adx_engine, compute_atr, com
                         compute_rsi, compute_zero_lag_ema, get_auto_donchian_length)
 from prepare_data import APP_DIR
 
-DISPLAY_BARS = 150
 PORTFOLIO_FILE = os.path.join(APP_DIR, "local_sandbox_portfolio.json")
 CONFIG_FILE = os.path.join(APP_DIR, "vp_config.json")
 
@@ -209,6 +208,11 @@ tf_config = {
     "5-Minute (5M)":   {"interval": "5m",  "period": "5d",  "is_intraday": True,  "resample": None,  "bar_width": 0.4, "auto_bars": 15},
 }
 selected_tf = st.sidebar.selectbox("Select Chart Resolution Timeframe", list(tf_config))
+st.sidebar.markdown("#### 🔭 Chart View")
+show_bars = st.sidebar.slider("Bars shown on chart", 40, 500, 150, 10, help="Fewer bars = bigger candles. All indicators are still calculated on the full history.")
+fit_y = st.sidebar.checkbox("Fit price axis to candles", value=True, help="Keeps candles full-size; far-away levels (stop, target) no longer squash the chart.")
+crosshair = st.sidebar.checkbox("Crosshair cursor lines", value=True, help="Dotted lines that follow the mouse across all panels, with price/time read-outs on the axes.")
+chart_drag = st.sidebar.selectbox("Mouse drag does", ["Pan", "Zoom box"], help="Mouse wheel always zooms. Double-click the chart to reset.")
 active_cfg = tf_config[selected_tf]
 
 df_raw = load_chart_data(selected_ticker, active_cfg)
@@ -352,7 +356,7 @@ all_df["CONF"] = (all_df[["C_sr", "C_rsi", "C_div"]].sum(axis=1)).where(_ok)
 anchor_end = len(all_df) - replay_bars_back
 hist = all_df.iloc[:anchor_end]                       # everything the system is allowed to know
 outcome_df = all_df.iloc[anchor_end:] if replay_bars_back > 0 else pd.DataFrame()
-df = hist.tail(DISPLAY_BARS).copy()
+df = hist.tail(int(show_bars)).copy()
 last = hist.iloc[-1]
 current_market_close = float(last["Close"])
 
@@ -597,7 +601,7 @@ else:
     proj_target_x = future_labels[-1]
 
 def hline(y, name, color, width=2, dash="dash"):
-    fig.add_trace(go.Scatter(x=timeline_x, y=[y] * len(df), mode="lines", name=name, line=dict(color=color, width=width, dash=dash)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=timeline_x, y=[y] * len(df), mode="lines", name=name, hoverinfo="skip", line=dict(color=color, width=width, dash=dash)), row=1, col=1)
 
 hline(structural_resistance, "Structural Resistance", "#FF007F")
 hline(structural_support, "Structural Support", "#00FFCC")
@@ -628,7 +632,7 @@ if show_bos:
     for _dir, _sym, _clr, _nm, _ypos in ((1, "triangle-up", "#00E676", "Bullish BOS/CHoCH", "Low"), (-1, "triangle-down", "#FF5252", "Bearish BOS/CHoCH", "High")):
         _e = _ev[_ev["BOS_event"] == _dir]
         if len(_e):
-            fig.add_trace(go.Scatter(x=list(_e.index.strftime(fmt)), y=_e[_ypos] * (0.99 if _dir > 0 else 1.01), mode="markers+text",
+            fig.add_trace(go.Scatter(x=list(_e.index.strftime(fmt)), y=_e[_ypos] + (-0.6 if _dir > 0 else 0.6) * _e["ATR"].fillna(0), mode="markers+text",
                                      text=["CHoCH" if c_ else "BOS" for c_ in _e["BOS_event_choch"]], textposition="bottom center" if _dir > 0 else "top center",
                                      marker=dict(symbol=_sym, size=13, color=_clr), name=_nm), row=1, col=1)
     _segx, _segy = [], []                       # short line from the swing that formed the broken level to the break bar
@@ -651,7 +655,7 @@ if show_div_sr and len(tr_div):
         ex_lbl, xx_lbl = _idx[ei].strftime(fmt), _idx[xi].strftime(fmt)
         if _idx[ei] in _vis:
             _ent[int(r_.side)][0].append(ex_lbl)
-            _ent[int(r_.side)][1].append(float(hist["Low"].iloc[ei]) * 0.955 if r_.side > 0 else float(hist["High"].iloc[ei]) * 1.045)
+            _ent[int(r_.side)][1].append(float(hist["Low"].iloc[ei] - 1.8 * np.nan_to_num(hist["ATR"].iloc[ei])) if r_.side > 0 else float(hist["High"].iloc[ei] + 1.8 * np.nan_to_num(hist["ATR"].iloc[ei])))
             _ent[int(r_.side)][2].append(r_.kind.replace(": ", "<br>"))
         if not r_.open and _idx[xi] in _vis:
             key = "STOP" if r_.reason == "STOP" else "TARGET" if r_.reason == "TARGET" else "SETUP"
@@ -663,8 +667,8 @@ if show_div_sr and len(tr_div):
             fig.add_trace(go.Scatter(x=_seg[win_][0], y=_seg[win_][1], mode="lines", line=dict(color=clr_, width=2, dash="dot"), name=nm_, connectgaps=False), row=1, col=1)
     for side_, sym_, clr_, nm_, pos_ in ((1, "triangle-up", "#00E676", "BUY (RSI div @ support)", "bottom center"), (-1, "triangle-down", "#FF1744", "SELL (RSI div @ resistance)", "top center")):
         if _ent[side_][0]:
-            fig.add_trace(go.Scatter(x=_ent[side_][0], y=_ent[side_][1], mode="markers+text", text=_ent[side_][2], textposition=pos_, textfont=dict(size=12, color=clr_),
-                                     marker=dict(symbol=sym_, size=20, color=clr_, line=dict(color="#FFFFFF", width=1.5)), name=nm_), row=1, col=1)
+            fig.add_trace(go.Scatter(x=_ent[side_][0], y=_ent[side_][1], mode="markers+text", text=_ent[side_][2], textposition=pos_, textfont=dict(size=11, color=clr_),
+                                     marker=dict(symbol=sym_, size=18, color=clr_, line=dict(color="#FFFFFF", width=1.5)), name=nm_), row=1, col=1)
     for key_, clr_, nm_ in (("STOP", "#FF5252", "Exit: stop"), ("TARGET", "#00E676", "Exit: target"), ("SETUP", "#FFB300", "Exit: opposite S/R setup")):
         if _ext[key_][0]:
             fig.add_trace(go.Scatter(x=_ext[key_][0], y=_ext[key_][1], mode="markers+text", text=_ext[key_][2], textposition="middle right", textfont=dict(size=11, color=clr_),
@@ -678,23 +682,95 @@ for col, nm, colr in (("Long_Diff", "Long Diff", "#E040FB"), ("Medium_Diff", "Me
     fig.add_trace(go.Scatter(x=timeline_x, y=df[col], mode="lines", name=nm, line=dict(color=colr, width=3)), row=3, col=1)
 fig.add_trace(go.Scatter(x=timeline_x, y=df["RSI_14"], mode="lines", name="RSI (14)", line=dict(color="#B388FF", width=2.5)), row=4, col=1)
 for _lvl in (rsi_buy_floor, rsi_sell_ceil):
-    fig.add_trace(go.Scatter(x=timeline_x, y=[_lvl] * len(df), mode="lines", showlegend=False, line=dict(color="#FF9100", width=1, dash="dot")), row=4, col=1)
-for _dir, _sym, _clr, _col, _ypos, _mult, _nm in ((1, "diamond", "#00E676", "DIV_ev_bull", "Low", 0.975, "Bullish RSI divergence"),
-                                                   (-1, "diamond", "#FF5252", "DIV_ev_bear", "High", 1.025, "Bearish RSI divergence")):
+    fig.add_trace(go.Scatter(x=timeline_x, y=[_lvl] * len(df), mode="lines", showlegend=False, hoverinfo="skip", line=dict(color="#FF9100", width=1, dash="dot")), row=4, col=1)
+for _dir, _sym, _clr, _col, _ypos, _mult, _nm in ((1, "diamond", "#00E676", "DIV_ev_bull", "Low", -1.1, "Bullish RSI divergence"),
+                                                   (-1, "diamond", "#FF5252", "DIV_ev_bear", "High", 1.1, "Bearish RSI divergence")):
     _d = df[df[_col] != 0]
     if len(_d):
-        fig.add_trace(go.Scatter(x=list(_d.index.strftime(fmt)), y=_d[_ypos] * _mult, mode="markers+text", text=["RSI Div"] * len(_d),
+        fig.add_trace(go.Scatter(x=list(_d.index.strftime(fmt)), y=_d[_ypos] + _mult * _d["ATR"].fillna(0), mode="markers+text", text=["RSI Div"] * len(_d), textfont=dict(size=11),
                                  textposition="bottom center" if _dir > 0 else "top center", marker=dict(symbol=_sym, size=11, color=_clr), name=_nm), row=1, col=1)
         fig.add_trace(go.Scatter(x=list(_d.index.strftime(fmt)), y=_d["RSI_14"], mode="markers", showlegend=False, marker=dict(symbol=_sym, size=10, color=_clr)), row=4, col=1)
 
+# ---- user drawing tools (sidebar): horizontal / vertical / cross lines, kept per ticker + timeframe
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📐 Chart Tools")
+st.session_state.setdefault("tp_lines", [])
+st.session_state.setdefault("tp_gid", 0)
+tool_kind = st.sidebar.selectbox("Line to add", ["Horizontal line", "Vertical line", "Cross lines (H + V)"])
+tool_price = st.sidebar.number_input("Price level (blank = last close)", value=None, placeholder=f"{current_market_close:.2f}", format="%.4f")
+tool_back = st.sidebar.number_input("Vertical line: bars back from latest candle", min_value=0, max_value=max(len(df) - 1, 0), value=0, step=1)
+_c1, _c2 = st.sidebar.columns(2)
+tool_color = _c1.color_picker("Colour", "#FFD600")
+tool_width = _c2.slider("Width", 1, 5, 2)
+tool_dash = st.sidebar.selectbox("Style", ["dash", "solid", "dot", "dashdot"])
+_b1, _b2, _b3 = st.sidebar.columns(3)
+if _b1.button("Add"):
+    st.session_state["tp_gid"] += 1
+    _y = float(tool_price) if tool_price is not None else float(current_market_close)
+    _x = df.index[-1 - int(tool_back)].strftime(fmt)
+    for _k in (["H"] if tool_kind.startswith("Hor") else ["V"] if tool_kind.startswith("Ver") else ["H", "V"]):
+        st.session_state["tp_lines"].append(dict(gid=st.session_state["tp_gid"], kind=_k, y=_y, x=_x, tk=selected_ticker, tf=selected_tf,
+                                                 color=tool_color, width=tool_width, dash=tool_dash))
+_mine = [l for l in st.session_state["tp_lines"] if l["tk"] == selected_ticker and l["tf"] == selected_tf]
+if _b2.button("Undo") and _mine:
+    _g = max(l["gid"] for l in _mine)
+    st.session_state["tp_lines"] = [l for l in st.session_state["tp_lines"] if not (l["tk"] == selected_ticker and l["tf"] == selected_tf and l["gid"] == _g)]
+if _b3.button("Clear"):
+    st.session_state["tp_lines"] = [l for l in st.session_state["tp_lines"] if not (l["tk"] == selected_ticker and l["tf"] == selected_tf)]
+_mine = [l for l in st.session_state["tp_lines"] if l["tk"] == selected_ticker and l["tf"] == selected_tf]
+st.sidebar.caption(f"{len(_mine)} line(s) on this chart. Use the toolbar above the chart for free-hand lines, rectangles and circles (drag them to move, eraser to delete).")
+
+_user_levels = []
+for ln in _mine:
+    _dsh = dict(color=ln["color"], width=ln["width"], dash=ln["dash"])
+    if ln["kind"] == "H":
+        fig.add_shape(type="line", xref="paper", yref="y", x0=0, x1=1, y0=ln["y"], y1=ln["y"], line=_dsh, layer="above")
+        fig.add_annotation(xref="paper", yref="y", x=1, y=ln["y"], text=f"{ln['y']:,.2f}", showarrow=False, xanchor="left", font=dict(color=ln["color"], size=13))
+        _user_levels.append(ln["y"])
+    elif ln["x"] in timeline_x:
+        fig.add_shape(type="line", xref="x", yref="paper", x0=ln["x"], x1=ln["x"], y0=0, y1=1, line=_dsh, layer="above")
+
+# ---- price axis fitted to the candles (+ nearby key levels), so nothing far away squashes the chart
+if fit_y:
+    _lo, _hi = float(df["Low"].min()), float(df["High"].max())
+    if replay_bars_back > 0 and not outcome_df.empty:
+        _o = outcome_df.head(forecast_lead_units)
+        _lo, _hi = min(_lo, float(_o["Low"].min())), max(_hi, float(_o["High"].max()))
+    _rng = max(_hi - _lo, 1e-9)
+    _c_lo, _c_hi = _lo, _hi
+    for _v in [structural_resistance, structural_support, stop_loss_price, take_profit_price, predicted_price] + _user_levels:
+        if np.isfinite(_v) and (_c_lo - 0.6 * _rng) <= _v <= (_c_hi + 0.6 * _rng):
+            _lo, _hi = min(_lo, _v), max(_hi, _v)
+    _pad = max(0.05 * (_hi - _lo), 2.6 * np.nan_to_num(atr))
+    fig.update_yaxes(range=[_lo - _pad, _hi + _pad], row=1, col=1)
+
 fig.update_layout(template=template, height=1400, xaxis_rangeslider_visible=False, paper_bgcolor=bg_color, plot_bgcolor=bg_color,
-                  margin=dict(l=40, r=40, t=30, b=30), font=dict(size=18, color=text_color),
-                  legend=dict(font=dict(size=16, color=text_color), orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1))
-fig.update_xaxes(type="category", categoryorder="array", categoryarray=total_axis_x, showgrid=True, gridcolor=grid_color, tickfont=dict(size=14, color=text_color), nticks=25)
-fig.update_yaxes(showgrid=True, gridcolor=grid_color, tickfont=dict(size=16, color=text_color))
+                  margin=dict(l=50, r=90, t=150, b=50), font=dict(size=18, color=text_color),
+                  legend=dict(font=dict(size=14, color=text_color), orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0),
+                  hovermode="x" if crosshair else "closest",
+                  hoverlabel=dict(bgcolor=card_bg, bordercolor=border_color, font=dict(color=text_color, size=13)),
+                  dragmode="pan" if chart_drag == "Pan" else "zoom",
+                  modebar=dict(orientation="v", bgcolor="rgba(0,0,0,0)", color=muted_color, activecolor="#00B0FF"),
+                  newshape=dict(line=dict(color="#FFD600", width=2), opacity=1),
+                  uirevision=f"{selected_ticker}|{selected_tf}|{show_bars}|{replay_bars_back}")   # keeps zoom/pan/drawings across reruns
+fig.update_xaxes(type="category", categoryorder="array", categoryarray=total_axis_x, showgrid=True, gridcolor=grid_color,
+                 tickfont=dict(size=13, color=text_color), nticks=18, tickangle=-35)
+fig.update_yaxes(showgrid=True, gridcolor=grid_color, tickfont=dict(size=15, color=text_color))
 fig.update_yaxes(row=2, col=1, showgrid=False, showticklabels=False)
 fig.update_yaxes(row=4, col=1, range=[0, 100], title_text="RSI")
-st.plotly_chart(fig, width="stretch")
+# only candles (and the lower panels) show hover read-outs; overlays/markers stay quiet so tooltips don't pile up
+for _tr in fig.data:
+    if _tr.type == "scatter" and (_tr.yaxis in (None, "y")):
+        _tr.hoverinfo = "skip"
+if crosshair:
+    _spike = dict(showspikes=True, spikemode="across", spikesnap="cursor", spikethickness=1, spikedash="dot", spikecolor=muted_color)
+    fig.update_xaxes(**_spike)
+    fig.update_yaxes(**_spike)
+st.plotly_chart(fig, width="stretch", config={
+    "scrollZoom": True, "displaylogo": False, "doubleClick": "reset",
+    "modeBarButtonsToAdd": ["drawline", "drawopenpath", "drawrect", "drawcircle", "eraseshape"],
+    "edits": {"shapePosition": True},
+    "toImageButtonOptions": {"format": "png", "filename": "tradepoint_chart", "scale": 2}})
 
 if show_div_sr:
     with st.expander("📋 RSI-divergence @ support/resistance - trade log & statistics", expanded=False):
