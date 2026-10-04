@@ -1,4 +1,5 @@
 import datetime
+import importlib.util
 import json
 import os
 import smtplib
@@ -12,6 +13,31 @@ import yfinance as yf
 from plotly.subplots import make_subplots
 
 st.set_page_config(page_title="Tradepoint", layout="wide")
+
+
+def _password_gate():
+    """Optional login for a public website: set the TRADEPOINT_PASSWORD environment variable (or Streamlit secret)."""
+    import hmac
+    pw = os.environ.get("TRADEPOINT_PASSWORD")
+    if not pw:
+        try:
+            pw = st.secrets.get("TRADEPOINT_PASSWORD")
+        except Exception:
+            pw = None
+    if not pw or st.session_state.get("_authed"):
+        return
+    st.markdown("## 🔒 Tradepoint")
+    entered = st.text_input("Password", type="password")
+    if entered:
+        if hmac.compare_digest(entered.encode(), str(pw).encode()):
+            st.session_state["_authed"] = True
+            st.rerun()
+        else:
+            st.error("Wrong password.")
+    st.stop()
+
+
+_password_gate()
 
 from bos_signals import compute_rsi_divergence, compute_structure
 from fetch_news import get_news_detail
@@ -404,7 +430,11 @@ if replay_bars_back > 0:
     st.info("Neural panel is disabled during replay: the saved model was trained on data that includes the replayed period, so it would not be a fair test. Use `python backtester.py TICKER` for an out-of-sample test.")
 else:
     snap = neural_snapshot(selected_ticker)
-    if "error" in snap:
+    if "error" in snap and importlib.util.find_spec("tensorflow") is None:
+        st.info("The neural model is switched off on this deployment (TensorFlow is not installed, to fit a small free server). "
+                "Everything else - structure marks, Donchian, RSI divergence trades, confluence probability and the hit-rate tables - works normally. "
+                "Run the full version on your PC or a 2 GB+ server to use the LSTM.")
+    elif "error" in snap:
         st.warning(f"No up-to-date model for {selected_ticker}. Train one: `python train_model.py {selected_ticker}`")
         if st.button(f"Train {selected_ticker} model now (about 1-2 min)"):
             with st.spinner("Training..."):
