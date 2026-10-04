@@ -647,9 +647,18 @@ if toggle_dc:
             if _bars:
                 fig.add_trace(go.Scatter(x=[all_df.index[b_].strftime(fmt) for b_ in _bars], y=[float(all_df[_px].iloc[b_]) for b_ in _bars], mode="markers",
                                          marker=dict(symbol="diamond-open", size=10, color="#FFD600", line=dict(width=2)), name=_nm), row=1, col=1)
+_pivot_levels = []
 if toggle_pivots:
+    # P = gold solid; resistances R1-R3 = warm reds (dash -> dashdot -> dot); supports S1-S3 = greens (same dashes). Price tag at the right edge.
+    _pv_style = {"P": ("#FFC400", 2.2, "solid"),
+                 "R1": ("#FF8A65", 1.8, "dash"), "R2": ("#F44336", 1.8, "dashdot"), "R3": ("#C62828", 1.8, "dot"),
+                 "S1": ("#4DB6AC", 1.8, "dash"), "S2": ("#00C853", 1.8, "dashdot"), "S3": ("#2E7D32", 1.8, "dot")}
     for name, val in compute_institutional_pivots(hist.tail(20), pivot_mode).items():
-        hline(val, f"Pivot {name}", "rgba(200,200,255,0.6)", 1, "dot")
+        _pc, _pw, _pd = _pv_style.get(name, ("#B0BEC5", 1.5, "dot"))
+        hline(val, f"Pivot {name}", _pc, _pw, _pd)
+        fig.add_annotation(xref="paper", yref="y", x=1, y=val, text=f"<b>{name}</b> {val:,.2f}", showarrow=False, xanchor="left",
+                           font=dict(color=_pc, size=13))
+        _pivot_levels.append(val)
 if show_bos:
     _ev = df[df["BOS_event"] != 0]
     for _dir, _sym, _clr, _nm, _ypos in ((1, "triangle-up", "#00E676", "Bullish BOS/CHoCH", "Low"), (-1, "triangle-down", "#FF5252", "Bearish BOS/CHoCH", "High")):
@@ -763,6 +772,10 @@ if fit_y:
     _c_lo, _c_hi = _lo, _hi
     for _v in [structural_resistance, structural_support, stop_loss_price, take_profit_price, predicted_price] + _user_levels:
         if np.isfinite(_v) and (_c_lo - 0.6 * _rng) <= _v <= (_c_hi + 0.6 * _rng):
+            _lo, _hi = min(_lo, _v), max(_hi, _v)
+    _c_lo2, _c_hi2 = _lo, _hi
+    for _v in _pivot_levels:      # pivots only stretch the axis when they sit close to the candles
+        if (_c_lo2 - 0.25 * _rng) <= _v <= (_c_hi2 + 0.25 * _rng):
             _lo, _hi = min(_lo, _v), max(_hi, _v)
     _pad = max(0.05 * (_hi - _lo), 2.6 * np.nan_to_num(atr))
     fig.update_yaxes(range=[_lo - _pad, _hi + _pad], row=1, col=1)
