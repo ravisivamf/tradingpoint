@@ -1,0 +1,7 @@
+{
+    "optimized_ticker": "CRM",
+    "structural_pivot_lookback": 5,
+    "rsi_buy_entry_floor": 30.0,
+    "rsi_sell_entry_ceiling": 70.0,
+    "verified_backtest_win_ratio": "58.33%"
+}
