@@ -272,15 +272,70 @@ st.sidebar.markdown("### ⏱️ Bar Replay / Past Testing Config")
 replay_mode = st.sidebar.checkbox("Enable Bar Replay Simulator", value=False)
 max_replay = max(0, min(500, len(df_raw) - 130))
 replay_bars_back = 0
+reveal_future = False
+_REPLAY_SPEEDS = {"10x": 0.05, "7x": 0.2, "3x": 0.5, "1x": 1.0, "0.3x": 3.0, "0.1x": 10.0}   # pause between bars (the app's own compute time adds to it)
 if replay_mode:
     if max_replay == 0:
         st.sidebar.warning("Not enough history for replay on this timeframe.")
     else:
-        replay_bars_back = st.sidebar.slider("Rewind Engine (Bars Back from Present)", 0, max_replay, min(100, max_replay))
+        # ---- state (all changes to the slider's value happen BEFORE the slider is created, via callbacks / this block)
+        _rk = f"{selected_ticker}|{selected_tf}"
+        if st.session_state.get("tp_rk") != _rk:
+            st.session_state.update(tp_rk=_rk, tp_rb=min(100, max_replay), tp_play=False)
+        if "tp_pending" in st.session_state:
+            st.session_state["tp_rb"] = st.session_state.pop("tp_pending")
+        st.session_state["tp_max"] = max_replay
+        st.session_state["tp_idx"] = [t.tz_localize(None) if t.tzinfo else t for t in pd.DatetimeIndex(df_raw.index)]
+        st.session_state["tp_rb"] = int(min(max(st.session_state.get("tp_rb", 0), 0), max_replay))
+
+        def _cb_step(d):
+            st.session_state["tp_rb"] = int(min(max(st.session_state["tp_rb"] + d, 0), st.session_state["tp_max"]))
+            st.session_state["tp_play"] = False
+        def _cb_play():
+            if st.session_state["tp_rb"] > 0:
+                st.session_state["tp_play"] = not st.session_state.get("tp_play", False)
+        def _cb_live():
+            st.session_state.update(tp_rb=0, tp_play=False)
+        def _cb_select():
+            idx = st.session_state["tp_idx"]
+            tgt = pd.Timestamp(st.session_state["tp_date"])
+            if st.session_state.get("tp_time") is not None and active_cfg["is_intraday"]:
+                tgt = tgt.normalize() + pd.Timedelta(hours=st.session_state["tp_time"].hour, minutes=st.session_state["tp_time"].minute)
+            else:
+                tgt = tgt.normalize() + pd.Timedelta(hours=23, minutes=59)
+            pos = int(pd.DatetimeIndex(idx).searchsorted(tgt, side="right"))     # bars at or before the chosen moment
+            st.session_state["tp_rb"] = int(min(max(len(idx) - pos, 0), st.session_state["tp_max"]))
+            st.session_state["tp_play"] = False
+
+        # ---- 1) select bar (like TradingView's "Select bar")
+        _first = st.session_state["tp_idx"][max(len(st.session_state["tp_idx"]) - 1 - max_replay, 0)]
+        _last = st.session_state["tp_idx"][-1]
+        _cur = st.session_state["tp_idx"][len(st.session_state["tp_idx"]) - 1 - st.session_state["tp_rb"]]
+        st.sidebar.caption("**Select bar** - start the replay from a date" + (" and time" if active_cfg["is_intraday"] else ""))
+        st.sidebar.date_input("Start date", value=_cur.date(), min_value=_first.date(), max_value=_last.date(), key="tp_date")
+        if active_cfg["is_intraday"]:
+            st.sidebar.time_input("Start time", value=_cur.time(), key="tp_time", step=300)
+        st.sidebar.button("📍 Go to this bar", on_click=_cb_select, use_container_width=True)
+
+        # ---- 2) transport controls
+        _playing = bool(st.session_state.get("tp_play", False)) and st.session_state["tp_rb"] > 0
+        _c = st.sidebar.columns(4)
+        _c[0].button("⏮", on_click=_cb_step, args=(1,), help="Step back one bar", use_container_width=True)
+        _c[1].button("⏸" if _playing else "▶", on_click=_cb_play, help="Play / pause", use_container_width=True)
+        _c[2].button("⏭", on_click=_cb_step, args=(-1,), help="Step forward one bar", use_container_width=True)
+        _c[3].button("⏩", on_click=_cb_live, help="Jump to real-time", use_container_width=True)
+        replay_speed = st.sidebar.select_slider("Replay speed", options=list(_REPLAY_SPEEDS), value="1x", help="Like TradingView: 10x is fastest, 0.1x is slowest. The app recalculates every bar, so very fast speeds are limited by the server.")
+        replay_bars_back = st.sidebar.slider("Replay position (bars before latest)", 0, max_replay, key="tp_rb",
+                                             help="Drag to scrub. 0 = real-time.")
+        reveal_future = st.sidebar.checkbox("Reveal what happened next (faded bars + scorecard)", value=False,
+                                            help="Off = blind replay like TradingView: you only see bars up to the replay point.")
         if replay_bars_back == 0:
-            st.sidebar.success("⚡ LIVE HORIZON: anchored to the latest close.")
+            st.sidebar.success("⚡ REAL-TIME: anchored to the latest close.")
         else:
-            st.sidebar.warning(f"⏮️ REPLAY ACTIVE: system evaluated {replay_bars_back} bars in the past.")
+            _at = st.session_state["tp_idx"][len(st.session_state["tp_idx"]) - 1 - replay_bars_back]
+            st.sidebar.warning(f"⏮️ REPLAY at **{_at:%Y-%m-%d %H:%M}** ({replay_bars_back} bars before latest)" + (" - ▶ playing" if _playing else ""))
+        st.session_state["tp_playing_now"] = _playing
+        st.session_state["tp_delay"] = _REPLAY_SPEEDS[replay_speed]
 
 st.sidebar.markdown("### Macro Forecasting Scope")
 scope_mode = st.sidebar.radio("Horizon Selection Mode", ["Auto-Pilot", "Manual Control"])
@@ -612,7 +667,8 @@ fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.02, ro
 fig.add_trace(go.Candlestick(x=timeline_x, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Market History"), row=1, col=1)
 
 if replay_bars_back > 0 and not outcome_df.empty:
-    outcome_df = outcome_df.head(int(forecast_lead_units))   # draw only the forecast horizon, so history keeps its width
+    outcome_df = outcome_df.head(int(forecast_lead_units))   # only the forecast horizon is ever used, so history keeps its width
+if replay_bars_back > 0 and not outcome_df.empty and reveal_future:
     outcome_x = list(outcome_df.index.strftime(fmt))
     total_axis_x = timeline_x + outcome_x
     fig.add_trace(go.Candlestick(x=outcome_x, open=outcome_df["Open"], high=outcome_df["High"], low=outcome_df["Low"],
@@ -765,7 +821,7 @@ for ln in _mine:
 # ---- price axis fitted to the candles (+ nearby key levels), so nothing far away squashes the chart
 if fit_y:
     _lo, _hi = float(df["Low"].min()), float(df["High"].max())
-    if replay_bars_back > 0 and not outcome_df.empty:
+    if replay_bars_back > 0 and not outcome_df.empty and reveal_future:
         _o = outcome_df
         _lo, _hi = min(_lo, float(_o["Low"].min())), max(_hi, float(_o["High"].max()))
     _rng = max(_hi - _lo, 1e-9)
@@ -848,7 +904,7 @@ if "ENTRY" in trend_direction:
 else:
     c3.warning(f"**3. Reversal Signal Status:**\n\n⚠️ PRICE MID-CHANNEL: {trend_direction}")
 
-if replay_bars_back > 0 and not outcome_df.empty:
+if replay_bars_back > 0 and not outcome_df.empty and reveal_future:
     st.markdown("### 🎯 Automated Replay Performance Scorecard")
     window = outcome_df.head(forecast_lead_units)
     tp_hit = sl_hit = False
@@ -1025,3 +1081,13 @@ if st.sidebar.button("Send stance alert"):
             st.sidebar.success(f"Sent to {user_email}")
         except Exception as e:
             st.sidebar.error(f"Email failed: {e}")
+
+# ------------------------------------------------------------------ replay autoplay: after the page is drawn, wait, advance one bar, redraw
+if replay_mode and st.session_state.get("tp_playing_now") and replay_bars_back > 0:
+    import time as _time
+    _time.sleep(float(st.session_state.get("tp_delay", 1.0)))
+    _nxt = replay_bars_back - 1
+    st.session_state["tp_pending"] = _nxt
+    if _nxt <= 0:
+        st.session_state["tp_play"] = False       # reached real-time: stop, like TradingView
+    st.rerun()
