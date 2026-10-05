@@ -181,6 +181,10 @@ input, textarea, [data-baseweb="select"] * {{ color: {text_color} !important; -w
 .stTable th, [data-testid="stTable"] th {{ background-color: {input_bg} !important; }}
 </style>""", unsafe_allow_html=True)
 st.markdown("<h1 style='font-size: 42px;'>📊 Tradepoint - Macro Predictive Platform</h1>", unsafe_allow_html=True)
+# page skeleton: headline numbers, then the replay bar and the chart together; the analysis panels follow below the chart
+metrics_slot = st.container()
+replay_slot = st.container()
+chart_slot = st.container()
 
 # ------------------------------------------------------------------ sidebar
 st.sidebar.markdown("---")
@@ -268,17 +272,18 @@ long_only = st.sidebar.checkbox("Long only (divergence trades)", value=False)
 st.sidebar.caption("Tuning these sliders to the table is curve-fitting - judge by the out-of-sample row.")
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("### ⏱️ Bar Replay / Past Testing Config")
-replay_mode = st.sidebar.checkbox("Enable Bar Replay Simulator", value=False)
+st.sidebar.markdown("### ⏱️ Bar Replay / Past Testing")
+st.sidebar.caption("The replay bar now sits directly above the chart.")
 max_replay = max(0, min(500, len(df_raw) - 130))
 replay_bars_back = 0
 reveal_future = False
 _REPLAY_SPEEDS = {"10x": 0.05, "7x": 0.2, "3x": 0.5, "1x": 1.0, "0.3x": 3.0, "0.1x": 10.0}   # pause between bars (the app's own compute time adds to it)
-if replay_mode:
-    if max_replay == 0:
-        st.sidebar.warning("Not enough history for replay on this timeframe.")
-    else:
-        # ---- state (all changes to the slider's value happen BEFORE the slider is created, via callbacks / this block)
+with replay_slot:
+    replay_mode = st.checkbox("⏱️ Bar Replay / Past Testing", value=False, key="tp_replay_on",
+                              help="Replays the market bar by bar from a past point. The system only sees data up to the replay bar.")
+    if replay_mode and max_replay == 0:
+        st.warning("Not enough history for replay on this timeframe.")
+    elif replay_mode:
         _rk = f"{selected_ticker}|{selected_tf}"
         if st.session_state.get("tp_rk") != _rk:
             st.session_state.update(tp_rk=_rk, tp_rb=min(100, max_replay), tp_play=False)
@@ -307,33 +312,33 @@ if replay_mode:
             st.session_state["tp_rb"] = int(min(max(len(idx) - pos, 0), st.session_state["tp_max"]))
             st.session_state["tp_play"] = False
 
-        # ---- 1) select bar (like TradingView's "Select bar")
-        _first = st.session_state["tp_idx"][max(len(st.session_state["tp_idx"]) - 1 - max_replay, 0)]
+        _n = len(st.session_state["tp_idx"])
+        _first = st.session_state["tp_idx"][max(_n - 1 - max_replay, 0)]
         _last = st.session_state["tp_idx"][-1]
-        _cur = st.session_state["tp_idx"][len(st.session_state["tp_idx"]) - 1 - st.session_state["tp_rb"]]
-        st.sidebar.caption("**Select bar** - start the replay from a date" + (" and time" if active_cfg["is_intraday"] else ""))
-        st.sidebar.date_input("Start date", value=_cur.date(), min_value=_first.date(), max_value=_last.date(), key="tp_date")
-        if active_cfg["is_intraday"]:
-            st.sidebar.time_input("Start time", value=_cur.time(), key="tp_time", step=300)
-        st.sidebar.button("📍 Go to this bar", on_click=_cb_select, use_container_width=True)
-
-        # ---- 2) transport controls
+        _cur = st.session_state["tp_idx"][_n - 1 - st.session_state["tp_rb"]]
         _playing = bool(st.session_state.get("tp_play", False)) and st.session_state["tp_rb"] > 0
-        _c = st.sidebar.columns(4)
-        _c[0].button("⏮", on_click=_cb_step, args=(1,), help="Step back one bar", use_container_width=True)
-        _c[1].button("⏸" if _playing else "▶", on_click=_cb_play, help="Play / pause", use_container_width=True)
-        _c[2].button("⏭", on_click=_cb_step, args=(-1,), help="Step forward one bar", use_container_width=True)
-        _c[3].button("⏩", on_click=_cb_live, help="Jump to real-time", use_container_width=True)
-        replay_speed = st.sidebar.select_slider("Replay speed", options=list(_REPLAY_SPEEDS), value="1x", help="Like TradingView: 10x is fastest, 0.1x is slowest. The app recalculates every bar, so very fast speeds are limited by the server.")
-        replay_bars_back = st.sidebar.slider("Replay position (bars before latest)", 0, max_replay, key="tp_rb",
-                                             help="Drag to scrub. 0 = real-time.")
-        reveal_future = st.sidebar.checkbox("Reveal what happened next (faded bars + scorecard)", value=False,
-                                            help="Off = blind replay like TradingView: you only see bars up to the replay point.")
+        _intr = active_cfg["is_intraday"]
+        _r1 = st.columns([1.5] + ([1.2] if _intr else []) + [1.4, 0.5, 0.5, 0.5, 0.5], vertical_alignment="bottom")
+        _k = 0
+        _r1[_k].date_input("Select bar - start date", value=_cur.date(), min_value=_first.date(), max_value=_last.date(), key="tp_date"); _k += 1
+        if _intr:
+            _r1[_k].time_input("Start time", value=_cur.time(), key="tp_time", step=300); _k += 1
+        _r1[_k].button("📍 Go to bar", on_click=_cb_select, use_container_width=True); _k += 1
+        _r1[_k].button("⏮", on_click=_cb_step, args=(1,), help="Step back one bar", use_container_width=True); _k += 1
+        _r1[_k].button("⏸" if _playing else "▶", on_click=_cb_play, help="Play / pause", use_container_width=True); _k += 1
+        _r1[_k].button("⏭", on_click=_cb_step, args=(-1,), help="Step forward one bar", use_container_width=True); _k += 1
+        _r1[_k].button("⏩", on_click=_cb_live, help="Jump to real-time", use_container_width=True)
+        _r2 = st.columns([3.2, 1.0, 1.8], vertical_alignment="bottom")
+        replay_bars_back = _r2[0].slider("Replay position (bars before latest) - drag to scrub, 0 = real-time", 0, max_replay, key="tp_rb")
+        replay_speed = _r2[1].selectbox("Speed", list(_REPLAY_SPEEDS), index=3,
+                                        help="10x fastest, 0.1x slowest. The app recalculates every bar, so very fast speeds are limited by the server.")
+        reveal_future = _r2[2].checkbox("Reveal what happens next", value=False,
+                                        help="Off = blind replay like TradingView: only bars up to the replay point are drawn. On = faded future bars + scorecard.")
         if replay_bars_back == 0:
-            st.sidebar.success("⚡ REAL-TIME: anchored to the latest close.")
+            st.success("⚡ REAL-TIME: anchored to the latest close.")
         else:
-            _at = st.session_state["tp_idx"][len(st.session_state["tp_idx"]) - 1 - replay_bars_back]
-            st.sidebar.warning(f"⏮️ REPLAY at **{_at:%Y-%m-%d %H:%M}** ({replay_bars_back} bars before latest)" + (" - ▶ playing" if _playing else ""))
+            _at = st.session_state["tp_idx"][_n - 1 - replay_bars_back]
+            st.warning(f"⏮️ REPLAY at **{_at:%Y-%m-%d %H:%M}** - {replay_bars_back} bars before the latest" + (" - ▶ playing" if _playing else ""))
         st.session_state["tp_playing_now"] = _playing
         st.session_state["tp_delay"] = _REPLAY_SPEEDS[replay_speed]
 
@@ -497,13 +502,14 @@ take_profit_price = predicted_price
 macro_return_pct = (predicted_price - current_market_close) / current_market_close * 100
 
 # ------------------------------------------------------------------ header metrics
-col1, col2, col3 = st.columns(3)
-col1.metric("Target Asset Ticker", selected_ticker)
-col2.metric("Structural Mode Stance", trend_direction)
-col2.caption(sentiment_label)
-col3.metric("Replay Anchor Target" if replay_bars_back else "Structural Target", f"{cs}{predicted_price:.2f}", f"{macro_return_pct:+.2f}% to target")
-if levels_adjusted:
-    st.caption("ℹ️ Price is outside its prior structural wall, so target/stop use ATR-based levels.")
+with metrics_slot:
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Target Asset Ticker", selected_ticker)
+    col2.metric("Structural Mode Stance", trend_direction)
+    col2.caption(sentiment_label)
+    col3.metric("Replay Anchor Target" if replay_bars_back else "Structural Target", f"{cs}{predicted_price:.2f}", f"{macro_return_pct:+.2f}% to target")
+    if levels_adjusted:
+        st.caption("ℹ️ Price is outside its prior structural wall, so target/stop use ATR-based levels.")
 
 # ------------------------------------------------------------------ neural model panel
 st.markdown("### 🧠 Neural Model (LSTM) - P(price higher in 4 trading days)")
@@ -660,6 +666,58 @@ def div_sr_trades(d, n, tol_pct, window, rr, long_only_):
 
 tr_div = div_sr_trades(hist, swing_n, div_tol, div_window, bos_rr, long_only) if show_div_sr else pd.DataFrame()
 
+
+# ------------------------------------------------------------------ chart helper script (runs inside the chart page)
+CHART_JS = r"""
+var gd = document.getElementById('{plot_id}');
+var BG='__BG__', FG='__FG__', EDGE='__EDGE__';
+function fmt(v){var a=Math.abs(v); return a>=10 ? v.toFixed(2) : (a>=1 ? v.toFixed(3) : v.toFixed(5));}
+// 1) live price label on the left price axis, exactly where the horizontal cursor line meets it
+var tag = document.createElement('div');
+tag.style.cssText='position:absolute;pointer-events:none;z-index:50;display:none;font:700 13px sans-serif;padding:2px 7px;border-radius:3px;transform:translate(-100%,-50%);white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,.4);background:#FFD600;color:#111;';
+gd.style.position='relative'; gd.appendChild(tag);
+gd.addEventListener('mousemove', function(e){
+  var fl = gd._fullLayout; if(!fl) return;
+  var r = gd.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+  var xa = fl.xaxis, shown = false;
+  if (x >= xa._offset && x <= xa._offset + xa._length) {
+    for (var k in fl) {
+      if (!/^yaxis\d*$/.test(k)) continue;
+      var ya = fl[k];
+      if (ya.showticklabels === false && k !== 'yaxis') continue;      // skip the hidden volume strip
+      if (y >= ya._offset && y <= ya._offset + ya._length) {
+        var v = ya.p2l(y - ya._offset);
+        tag.textContent = fmt(v); tag.style.left = (xa._offset - 3) + 'px'; tag.style.top = y + 'px'; tag.style.display='block'; shown = true; break;
+      }
+    }
+  }
+  if (!shown) tag.style.display='none';
+});
+gd.addEventListener('mouseleave', function(){ tag.style.display='none'; });
+
+// 2) price tags on lines / rectangles / circles you draw with the toolbar (updated when you draw, move or resize them)
+var busy=false, lastSig='';
+function refreshLabels(){
+  if (busy) return;
+  var L = gd.layout, shapes = L.shapes || [], keep = (L.annotations || []).filter(function(a){return a.name !== 'tp_shape_lbl';});
+  var labs = [];
+  shapes.forEach(function(s){
+    if (!s || s.name === 'tp_user' || (s.type !== 'line' && s.type !== 'rect' && s.type !== 'circle')) return;
+    if (!s.yref || s.yref === 'paper') return;
+    var pts = (s.type === 'line') ? [[s.x0, s.y0], [s.x1, s.y1]] : [[s.x1, s.y0], [s.x1, s.y1]];
+    pts.forEach(function(p){
+      labs.push({name:'tp_shape_lbl', xref:s.xref, yref:s.yref, x:p[0], y:p[1], text:'<b>'+fmt(+p[1])+'</b>', showarrow:false,
+                 xanchor:'left', xshift:6, bgcolor:'#FFD600', font:{color:'#111', size:12}, borderpad:2});
+    });
+  });
+  var sig = JSON.stringify(labs.map(function(a){return [a.x,a.y,a.yref];}));
+  if (sig === lastSig) return;
+  lastSig = sig; busy = true;
+  Plotly.relayout(gd, {annotations: keep.concat(labs)}).then(function(){busy=false;}, function(){busy=false;});
+}
+gd.on('plotly_relayout', function(){ setTimeout(refreshLabels, 0); });
+"""
+
 # ------------------------------------------------------------------ chart
 fmt = '%Y-%m-%d %H:%M' if active_cfg["is_intraday"] else '%Y-%m-%d'
 timeline_x = list(df.index.strftime(fmt))
@@ -679,13 +737,15 @@ else:
     total_axis_x = timeline_x + future_labels
     proj_target_x = future_labels[-1]
 
-def hline(y, name, color, width=2, dash="dash"):
+def hline(y, name, color, width=2, dash="dash", tag=None):
     fig.add_trace(go.Scatter(x=timeline_x, y=[y] * len(df), mode="lines", name=name, hoverinfo="skip", line=dict(color=color, width=width, dash=dash)), row=1, col=1)
+    if tag:   # exact price written at the right edge of the line
+        fig.add_annotation(xref="paper", yref="y", x=1, y=y, text=f"<b>{tag}</b> {y:,.2f}", showarrow=False, xanchor="left", font=dict(color=color, size=13))
 
-hline(structural_resistance, "Structural Resistance", "#FF007F")
-hline(structural_support, "Structural Support", "#00FFCC")
-hline(stop_loss_price, "Risk Stop", "#FF9100", 2.5, "dot")
-hline(take_profit_price, "Target Profit", "#00B0FF", 2.5, "dot")
+hline(structural_resistance, "Structural Resistance", "#FF007F", tag="RES")
+hline(structural_support, "Structural Support", "#00FFCC", tag="SUP")
+hline(stop_loss_price, "Risk Stop", "#FF9100", 2.5, "dot", tag="STOP")
+hline(take_profit_price, "Target Profit", "#00B0FF", 2.5, "dot", tag="TGT")
 if toggle_bb:
     for col in ("BB_Upper", "BB_Lower"):
         fig.add_trace(go.Scatter(x=timeline_x, y=df[col], mode="lines", line=dict(color=bb_color, width=bb_width), name=col.replace("_", " ")), row=1, col=1)
@@ -812,11 +872,11 @@ _user_levels = []
 for ln in _mine:
     _dsh = dict(color=ln["color"], width=ln["width"], dash=ln["dash"])
     if ln["kind"] == "H":
-        fig.add_shape(type="line", xref="paper", yref="y", x0=0, x1=1, y0=ln["y"], y1=ln["y"], line=_dsh, layer="above")
+        fig.add_shape(type="line", xref="paper", yref="y", x0=0, x1=1, y0=ln["y"], y1=ln["y"], line=_dsh, layer="above", name="tp_user")
         fig.add_annotation(xref="paper", yref="y", x=1, y=ln["y"], text=f"{ln['y']:,.2f}", showarrow=False, xanchor="left", font=dict(color=ln["color"], size=13))
         _user_levels.append(ln["y"])
     elif ln["x"] in timeline_x:
-        fig.add_shape(type="line", xref="x", yref="paper", x0=ln["x"], x1=ln["x"], y0=0, y1=1, line=_dsh, layer="above")
+        fig.add_shape(type="line", xref="x", yref="paper", x0=ln["x"], x1=ln["x"], y0=0, y1=1, line=_dsh, layer="above", name="tp_user")
 
 # ---- price axis fitted to the candles (+ nearby key levels), so nothing far away squashes the chart
 if fit_y:
@@ -837,7 +897,7 @@ if fit_y:
     fig.update_yaxes(range=[_lo - _pad, _hi + _pad], row=1, col=1)
 
 fig.update_layout(template=template, height=1400, xaxis_rangeslider_visible=False, paper_bgcolor=bg_color, plot_bgcolor=bg_color,
-                  margin=dict(l=50, r=90, t=150, b=50), font=dict(size=18, color=text_color),
+                  margin=dict(l=50, r=130, t=150, b=50), font=dict(size=18, color=text_color),
                   legend=dict(font=dict(size=14, color=text_color), orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0),
                   hovermode="x" if crosshair else "closest",
                   hoverlabel=dict(bgcolor=card_bg, bordercolor=border_color, font=dict(color=text_color, size=13)),
@@ -853,16 +913,26 @@ fig.update_yaxes(row=4, col=1, range=[0, 100], title_text="RSI")
 # only candles (and the lower panels) show hover read-outs; overlays/markers stay quiet so tooltips don't pile up
 for _tr in fig.data:
     if _tr.type == "scatter" and (_tr.yaxis in (None, "y")):
-        _tr.hoverinfo = "skip"
+        if "markers" in str(_tr.mode) or _tr.hoverinfo == "skip":
+            _tr.hoverinfo = "skip"
+        else:
+            _tr.hovertemplate = "%{y:,.2f}  <i>%{fullData.name}</i><extra></extra>"
 if crosshair:
     _spike = dict(showspikes=True, spikemode="across", spikesnap="cursor", spikethickness=1, spikedash="dot", spikecolor=muted_color)
     fig.update_xaxes(**_spike)
     fig.update_yaxes(**_spike)
-st.plotly_chart(fig, width="stretch", config={
-    "scrollZoom": True, "displaylogo": False, "doubleClick": "reset",
-    "modeBarButtonsToAdd": ["drawline", "drawopenpath", "drawrect", "drawcircle", "eraseshape"],
-    "edits": {"shapePosition": True},
-    "toImageButtonOptions": {"format": "png", "filename": "tradepoint_chart", "scale": 2}})
+_cfg = {"scrollZoom": True, "displaylogo": False, "doubleClick": "reset",
+        "modeBarButtonsToAdd": ["drawline", "drawopenpath", "drawrect", "drawcircle", "eraseshape"],
+        "edits": {"shapePosition": True},
+        "toImageButtonOptions": {"format": "png", "filename": "tradepoint_chart", "scale": 2}}
+_js = CHART_JS.replace("__BG__", card_bg).replace("__FG__", text_color).replace("__EDGE__", border_color)
+_html = fig.to_html(full_html=True, include_plotlyjs="cdn", config=_cfg, post_script=_js, default_height="1400px", default_width="100%")
+_html = _html.replace("</head>", f"<style>html,body{{margin:0;padding:0;background:{bg_color};overflow:hidden}}</style></head>", 1)
+with chart_slot:
+    if hasattr(st, "iframe"):          # newer Streamlit
+        st.iframe(_html, height=1410)
+    else:                              # older Streamlit (requirements allow >=1.40)
+        st.components.v1.html(_html, height=1410, scrolling=False)
 
 if show_div_sr:
     with st.expander("📋 RSI-divergence @ support/resistance - trade log & statistics", expanded=False):
