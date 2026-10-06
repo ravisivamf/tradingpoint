@@ -44,8 +44,12 @@ _password_gate()
 
 from bos_signals import compute_rsi_divergence, compute_structure
 from fetch_news import get_news_detail
-from indicators import (donchian_extension_buy, auto_edge_donchian, compute_adx_engine, compute_atr, compute_edge_donchian, compute_institutional_pivots,
+from indicators import (auto_edge_donchian, compute_adx_engine, compute_atr, compute_edge_donchian, compute_institutional_pivots,
                         compute_rsi, compute_zero_lag_ema, get_auto_donchian_length)
+try:
+    from indicators import donchian_extension_buy
+except ImportError:          # indicators.py in the repo is older than app.py: keep the app running, switch the new signal off
+    donchian_extension_buy = None
 from prepare_data import APP_DIR
 
 PORTFOLIO_FILE = os.path.join(APP_DIR, "local_sandbox_portfolio.json")
@@ -264,9 +268,12 @@ else:
     dc_n = st.sidebar.slider("Edge swing strength (bars each side)", 2, 8, 3)
 
 st.sidebar.markdown("#### Donchian Extension BUY (auto length)")
-dcx_on = st.sidebar.checkbox("Show Donchian-extension BUY signals", value=True,
+dcx_on = st.sidebar.checkbox("Show Donchian-extension BUY signals", value=donchian_extension_buy is not None, disabled=donchian_extension_buy is None,
     help="Starts with a 20-bar lower Donchian, extends it left to the nearest earlier candle at/below it (e.g. 104 bars further -> length 124), "
          "and signals BUY when that old low rolls out (lower channel steps UP) and the current candle's Low sits on the lower channel.")
+if donchian_extension_buy is None:
+    st.sidebar.error("indicators.py on the server is out of date. Upload the latest indicators.py next to app.py to enable this signal.")
+dcx_on = dcx_on and donchian_extension_buy is not None
 dcx_base = st.sidebar.slider("Initial Donchian length", 5, 60, 20)
 dcx_min = st.sidebar.slider("Old low must be at least this many bars back", 21, 200, 30)
 dcx_tol = st.sidebar.slider("Old low within (x ATR) of the current low", 0.25, 3.0, 1.0, 0.25,
