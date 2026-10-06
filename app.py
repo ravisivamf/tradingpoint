@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import smtplib
+import time
 from email.mime.text import MIMEText
 
 import numpy as np
@@ -11,6 +12,8 @@ import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 from plotly.subplots import make_subplots
+
+_T0 = time.time()   # start of this script run (used to keep the live-refresh cadence)
 
 st.set_page_config(page_title="Tradepoint", layout="wide")
 
@@ -41,7 +44,7 @@ _password_gate()
 
 from bos_signals import compute_rsi_divergence, compute_structure
 from fetch_news import get_news_detail
-from indicators import (auto_edge_donchian, compute_adx_engine, compute_atr, compute_edge_donchian, compute_institutional_pivots,
+from indicators import (donchian_extension_buy, auto_edge_donchian, compute_adx_engine, compute_atr, compute_edge_donchian, compute_institutional_pivots,
                         compute_rsi, compute_zero_lag_ema, get_auto_donchian_length)
 from prepare_data import APP_DIR
 
@@ -50,8 +53,8 @@ CONFIG_FILE = os.path.join(APP_DIR, "vp_config.json")
 
 
 # ------------------------------------------------------------------ data
-@st.cache_data(ttl=60)
-def high_speed_market_download(ticker, period, interval):
+@st.cache_data(ttl=120)
+def high_speed_market_download(ticker, period, interval, bucket=0):      # `bucket` changes every refresh in live mode, so the cache is bypassed
     try:
         df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
         if df is None or df.empty:
@@ -63,8 +66,8 @@ def high_speed_market_download(ticker, period, interval):
         return pd.DataFrame()
 
 
-def load_chart_data(ticker, cfg):
-    df = high_speed_market_download(ticker, cfg["period"], cfg["interval"])
+def load_chart_data(ticker, cfg, bucket=0):
+    df = high_speed_market_download(ticker, cfg["period"], cfg["interval"], bucket)
     if not df.empty and cfg.get("resample"):
         # real 2H/4H bars aligned to the 9:30 open (previously these were just 1H bars with a different label)
         firsts = pd.Series(df.index, index=df.index).groupby(df.index.date).first()
@@ -217,16 +220,21 @@ show_bars = st.sidebar.slider("Bars shown on chart", 40, 500, 150, 10, help="Few
 fit_y = st.sidebar.checkbox("Fit price axis to candles", value=True, help="Keeps candles full-size; far-away levels (stop, target) no longer squash the chart.")
 crosshair = st.sidebar.checkbox("Crosshair cursor lines", value=True, help="Dotted lines that follow the mouse across all panels, with price/time read-outs on the axes.")
 chart_drag = st.sidebar.selectbox("Mouse drag does", ["Pan", "Zoom box"], help="Mouse wheel always zooms. Double-click the chart to reset.")
+live_on = st.sidebar.checkbox("🔴 Live market (auto-refresh)", value=False, key="tp_live",
+    help="Re-downloads the latest bars every few seconds so the last candle moves and a new candle appears when a bar closes. "
+         "Yahoo's free feed is polled (not streamed) and can be delayed up to ~15-20 min on some exchanges.")
+live_every = int(st.sidebar.selectbox("Refresh every (seconds)", [5, 10, 15, 30, 60], index=1, disabled=not live_on))
 improved_rules = st.sidebar.checkbox("Improved entry & target rules", value=True,
     help="Target = nearest of wall / Donchian edge / ATR reach for the forecast horizon (not always the far wall). Stop = 1.5 ATR beyond the wall (not 3%). "
          "A fresh RSI divergence near a wall (within 3%) also counts as a reversal entry. Untick to use the old rules; the hit-rate section compares both.")
 active_cfg = tf_config[selected_tf]
 
-df_raw = load_chart_data(selected_ticker, active_cfg)
+_bucket = int(time.time() // live_every) if live_on else int(time.time() // 60)
+df_raw = load_chart_data(selected_ticker, active_cfg, _bucket)
 if df_raw.empty:
     st.sidebar.warning("⚠️ Intraday data unavailable - falling back to Daily.")
     active_cfg = tf_config["Daily (1D)"]
-    df_raw = load_chart_data(selected_ticker, active_cfg)
+    df_raw = load_chart_data(selected_ticker, active_cfg, _bucket)
 if df_raw.empty:
     st.error(f"No market data found for '{selected_ticker}'. Non-US stocks need the Yahoo exchange suffix (e.g. RELIANCE.NS, VOD.L, 7203.T).")
     _sug = search_symbols(selected_ticker)
@@ -255,6 +263,15 @@ else:
     length_DC = st.sidebar.slider("Manual Donchian Channel Lookback", 2, 100, 20)
     dc_n = st.sidebar.slider("Edge swing strength (bars each side)", 2, 8, 3)
 
+st.sidebar.markdown("#### Donchian Extension BUY (auto length)")
+dcx_on = st.sidebar.checkbox("Show Donchian-extension BUY signals", value=True,
+    help="Starts with a 20-bar lower Donchian, extends it left to the nearest earlier candle at/below it (e.g. 104 bars further -> length 124), "
+         "and signals BUY when that old low rolls out (lower channel steps UP) and the current candle's Low sits on the lower channel.")
+dcx_base = st.sidebar.slider("Initial Donchian length", 5, 60, 20)
+dcx_min = st.sidebar.slider("Old low must be at least this many bars back", 21, 200, 30)
+dcx_tol = st.sidebar.slider("Old low within (x ATR) of the current low", 0.25, 3.0, 1.0, 0.25,
+                            help="Keeps it a real retest of support. Larger = more signals, looser support.")
+dcx_back = st.sidebar.slider("Look back at most (bars)", 100, 1000, 400, 50)
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🧱 Structure Marks (BOS / CHoCH) - chart only")
 show_bos = st.sidebar.checkbox("Show BOS / CHoCH marks", value=True)
@@ -398,6 +415,10 @@ else:
     all_df["DC_Lower"] = all_df["Low"].rolling(length_DC).min()
     all_df["DC_up_bar"] = np.nan
     all_df["DC_lo_bar"] = np.nan
+if dcx_on:
+    _dcx = donchian_extension_buy(all_df, base_len=dcx_base, min_dist=max(dcx_min, dcx_base + 1), max_back=dcx_back, tol_atr=dcx_tol)
+    for _c in _dcx.columns:
+        all_df[_c] = _dcx[_c]
 # structural walls: PRIOR N bars, current bar excluded (identical to optimize_pipeline.py)
 all_df["Wall_Res"] = all_df["High"].rolling(sr_eff).max().shift(1)
 all_df["Wall_Sup"] = all_df["Low"].rolling(sr_eff).min().shift(1)
@@ -502,6 +523,58 @@ take_profit_price = predicted_price
 macro_return_pct = (predicted_price - current_market_close) / current_market_close * 100
 
 # ------------------------------------------------------------------ header metrics
+live_active = bool(live_on and not replay_mode)
+_IV_MIN = {"5m": 5, "15m": 15, "30m": 30, "1h": 60, "60m": 60, "2h": 120, "4h": 240}
+_iv_min = _IV_MIN.get(active_cfg.get("resample") or active_cfg["interval"])
+_ix = hist.index
+_lastbar = hist.iloc[-1]
+_px = float(_lastbar["Close"])
+if active_cfg["is_intraday"]:
+    _today = hist[_ix.date == _ix[-1].date()]
+    _before = hist[_ix.date < _ix[-1].date()]
+    _prev_close = float(_before["Close"].iloc[-1]) if len(_before) else float(_today["Open"].iloc[0])
+    _day_hi, _day_lo = float(_today["High"].max()), float(_today["Low"].min())
+else:
+    _prev_close = float(hist["Close"].iloc[-2]) if len(hist) > 1 else float(_lastbar["Open"])
+    _day_hi, _day_lo = float(_lastbar["High"]), float(_lastbar["Low"])
+_chg = _px - _prev_close
+_chg_pct = _chg / _prev_close * 100 if _prev_close else 0.0
+_up_c, _dn_c = "#00C853", "#FF5252"
+_pc = _up_c if _chg >= 0 else _dn_c
+_status, _note = "SNAPSHOT", f"data refreshes about every minute; tick <b>Live market</b> in the sidebar for auto-refresh"
+if replay_mode and replay_bars_back > 0:
+    _status, _note = "REPLAY", "price shown is the replay bar's close"
+elif _iv_min:     # intraday: how fresh is the last bar, and when does it close?
+    _now = pd.Timestamp.now(tz=_ix.tz) if _ix.tz is not None else pd.Timestamp.now()
+    _age = (_now - _ix[-1]).total_seconds() / 60.0
+    _left = _iv_min * 60 - (_now - _ix[-1]).total_seconds()
+    if _age > 3 * _iv_min + 5:
+        _note = f"last bar {_age:,.0f} min ago - market closed or this feed is delayed"
+    else:
+        _note = f"bar opened {_ix[-1]:%H:%M}" + (f" - closes in {int(_left // 60):02d}:{int(_left % 60):02d}" if 0 < _left <= _iv_min * 60 else "")
+    if live_active:
+        _status = "LIVE"
+elif live_active:
+    _status, _note = "LIVE", f"daily bar of {_ix[-1]:%Y-%m-%d} updates as the session trades"
+_badge_c = "#FF1744" if _status == "LIVE" else ("#FFB300" if _status == "REPLAY" else muted_color)
+_cs_h = cs.replace('$', '&#36;')
+with metrics_slot:
+    st.markdown(f"""
+<style>@keyframes tpPulse {{0%{{opacity:1}}50%{{opacity:.25}}100%{{opacity:1}}}}
+[data-testid="stMarkdownContainer"] .tp-badge {{ color:{_badge_c} !important; }}
+[data-testid="stMarkdownContainer"] .tp-px {{ color:{_pc} !important; }}
+[data-testid="stMarkdownContainer"] .tp-tk {{ color:{text_color} !important; }}
+[data-testid="stMarkdownContainer"] .tp-mu {{ color:{muted_color} !important; }}</style>
+<div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 22px;padding:10px 16px;margin:4px 0 10px 0;border:1px solid {border_color};border-radius:10px;background:{card_bg};">
+  <span class="tp-badge" style="font-weight:800;font-size:15px;letter-spacing:.5px;"><span style="{'animation:tpPulse 1.2s infinite;' if _status == 'LIVE' else ''}">●</span> {_status}{f' · every {live_every}s' if live_active else ''}</span>
+  <span class="tp-tk" style="font-weight:700;font-size:20px;">{selected_ticker}</span>
+  <span class="tp-px" style="font-weight:800;font-size:34px;">{_cs_h}{_px:,.2f}</span>
+  <span class="tp-px" style="font-weight:700;font-size:18px;">{_chg:+,.2f} ({_chg_pct:+.2f}%)</span>
+  <span class="tp-mu" style="font-size:15px;">{'Day' if active_cfg['is_intraday'] else 'Bar'} range {_cs_h}{_day_lo:,.2f} - {_cs_h}{_day_hi:,.2f}</span>
+  <span class="tp-mu" style="font-size:15px;">{_note}</span>
+  <span class="tp-mu" style="font-size:13px;margin-left:auto;">refreshed {datetime.datetime.now(datetime.timezone.utc):%H:%M:%S} UTC</span>
+</div>""", unsafe_allow_html=True)
+
 with metrics_slot:
     col1, col2, col3 = st.columns(3)
     col1.metric("Target Asset Ticker", selected_ticker)
@@ -716,6 +789,57 @@ function refreshLabels(){
   Plotly.relayout(gd, {annotations: keep.concat(labs)}).then(function(){busy=false;}, function(){busy=false;});
 }
 gd.on('plotly_relayout', function(){ setTimeout(refreshLabels, 0); });
+
+// 3) keep zoom/pan and drawn shapes across live refreshes (sessionStorage, per ticker/timeframe)
+var VKEY = 'tpview:' + __KEY__, restoring = false;
+function cats(){ return (gd.layout.xaxis && gd.layout.xaxis.categoryarray) || []; }
+function shiftPath(p, d){ return p.replace(/(-?\d*\.?\d+(?:e[-+]?\d+)?),(-?\d*\.?\d+(?:e[-+]?\d+)?)/gi, function(m,a,b){ return (parseFloat(a)+d)+','+b; }); }
+function saveState(inclX, inclY){
+  try{
+    var c = cats(), fl = gd._fullLayout, old = JSON.parse(sessionStorage.getItem(VKEY) || '{}'), sv = {};
+    if (inclX) sv.xr = fl.xaxis.range.slice(); else if (old.xr) sv.xr = old.xr;
+    if (inclY) sv.yr = fl.yaxis.range.slice(); else if (old.yr) sv.yr = old.yr;
+    sv.shapes = (gd.layout.shapes || []).filter(function(s){return s && s.name !== 'tp_user';});
+    sv.last = c[c.length-1]; sv.n = c.length;
+    sessionStorage.setItem(VKEY, JSON.stringify(sv));
+  }catch(e){}
+}
+gd.on('plotly_relayout', function(ev){
+  if (restoring) return;
+  var k = Object.keys(ev || {});
+  if (k.some(function(x){return /autorange$/.test(x);})) { try{sessionStorage.removeItem(VKEY);}catch(e){} return; }
+  saveState(k.some(function(x){return /^xaxis\.range/.test(x);}), k.some(function(x){return /^yaxis\.range/.test(x);}));
+});
+(function(){
+  try{
+    var sv = JSON.parse(sessionStorage.getItem(VKEY) || 'null'); if(!sv) return;
+    var c = cats(), upd = {}, rng = {};
+    if (sv.xr) Object.keys(gd._fullLayout).forEach(function(k){ if (/^xaxis\d*$/.test(k)) rng[k + '.range'] = sv.xr; });   // all stacked panels share the x range
+    if (sv.yr) rng['yaxis.range'] = sv.yr;
+    if (sv.shapes && sv.shapes.length){
+      var j = c.indexOf(sv.last), d = (j >= 0) ? (j - (sv.n - 1)) : null;
+      if (d !== null){
+        var moved = sv.shapes.map(function(s){
+          var t = JSON.parse(JSON.stringify(s));
+          if (typeof t.xref === 'string' && t.xref.charAt(0) === 'x'){
+            if (typeof t.x0 === 'number') t.x0 += d;
+            if (typeof t.x1 === 'number') t.x1 += d;
+            if (t.path) t.path = shiftPath(t.path, d);
+          }
+          return t;
+        });
+        upd['shapes'] = (gd.layout.shapes || []).concat(moved);
+      }
+    }
+    if (Object.keys(upd).length || Object.keys(rng).length){
+      restoring = true;
+      var done = function(){ restoring = false; saveState(!!sv.xr, !!sv.yr); };
+      // shapes first, then the axis ranges: Plotly ignores range changes sent in the same call as a shapes update
+      var p1 = Object.keys(upd).length ? Plotly.relayout(gd, upd) : Promise.resolve();
+      p1.then(function(){ return Object.keys(rng).length ? Plotly.relayout(gd, rng) : null; }).then(done, function(){ restoring = false; });
+    }
+  }catch(e){}
+})();
 """
 
 # ------------------------------------------------------------------ chart
@@ -746,6 +870,8 @@ hline(structural_resistance, "Structural Resistance", "#FF007F", tag="RES")
 hline(structural_support, "Structural Support", "#00FFCC", tag="SUP")
 hline(stop_loss_price, "Risk Stop", "#FF9100", 2.5, "dot", tag="STOP")
 hline(take_profit_price, "Target Profit", "#00B0FF", 2.5, "dot", tag="TGT")
+_lc = float(df["Close"].iloc[-1])
+hline(_lc, "Last price", _up_c if _lc >= float(df["Open"].iloc[-1]) else _dn_c, 1.3, "dot", tag="LAST")
 if toggle_bb:
     for col in ("BB_Upper", "BB_Lower"):
         fig.add_trace(go.Scatter(x=timeline_x, y=df[col], mode="lines", line=dict(color=bb_color, width=bb_width), name=col.replace("_", " ")), row=1, col=1)
@@ -775,6 +901,31 @@ if toggle_pivots:
         fig.add_annotation(xref="paper", yref="y", x=1, y=val, text=f"<b>{name}</b> {val:,.2f}", showarrow=False, xanchor="left",
                            font=dict(color=_pc, size=13))
         _pivot_levels.append(val)
+if dcx_on:
+    _start = len(hist) - len(df)                                   # position of the first visible bar inside all_df
+    _vis = df[df["DCX_buy"] == True]
+    for _ts, _r in _vis.iterrows():
+        _t = all_df.index.get_loc(_ts)
+        _j = int(_r["DCX_past"])
+        _x0 = timeline_x[max(_j - _start, 0)]
+        _old = float(all_df["Low"].iloc[_j])
+        fig.add_trace(go.Scatter(x=[_x0, _ts.strftime(fmt)], y=[_old, _old], mode="lines", line=dict(color="#00E676", width=1.5, dash="dot"),
+                                 hoverinfo="skip", showlegend=False), row=1, col=1)
+        if _j >= _start:
+            fig.add_trace(go.Scatter(x=[timeline_x[_j - _start]], y=[_old], mode="markers", marker=dict(symbol="circle-open", size=11, color="#00E676", line=dict(width=2)),
+                                     hovertemplate=f"old support low {_old:,.2f}<extra></extra>", showlegend=False), row=1, col=1)
+    if len(_vis):
+        fig.add_trace(go.Scatter(x=[ts.strftime(fmt) for ts in _vis.index], y=_vis["Low"] - 1.0 * df.loc[_vis.index, "ATR"].fillna(0),
+                                 mode="markers+text", text=[f"BUY<br>DC {int(n_)}" for n_ in _vis["DCX_len"]], textposition="bottom center", textfont=dict(size=11, color="#00E676"),
+                                 marker=dict(symbol="triangle-up", size=20, color="#00E676", line=dict(width=1, color="#FFFFFF")),
+                                 hovertemplate="Donchian-extension BUY<br>auto length %{text}<extra></extra>", name="Donchian-ext BUY"), row=1, col=1)
+    # preview for the LATEST bar: the 20-bar lower channel extended left to the old low (what you would measure by hand)
+    _lr = hist.iloc[-1]
+    if np.isfinite(_lr.get("DCX_past", np.nan)):
+        _j = int(_lr["DCX_past"]); _lvl = float(_lr["DCX_level"])
+        _x0 = timeline_x[max(_j - _start, 0)]
+        fig.add_trace(go.Scatter(x=[_x0, timeline_x[-1]], y=[_lvl, _lvl], mode="lines", line=dict(color="#80CBC4", width=1.5, dash="dash"),
+                                 name=f"Lower DC {dcx_base} extended to old low ({int(_lr['DCX_len'])} bars)", hoverinfo="skip"), row=1, col=1)
 if show_bos:
     _ev = df[df["BOS_event"] != 0]
     for _dir, _sym, _clr, _nm, _ypos in ((1, "triangle-up", "#00E676", "Bullish BOS/CHoCH", "Low"), (-1, "triangle-down", "#FF5252", "Bearish BOS/CHoCH", "High")):
@@ -925,10 +1076,19 @@ _cfg = {"scrollZoom": True, "displaylogo": False, "doubleClick": "reset",
         "modeBarButtonsToAdd": ["drawline", "drawopenpath", "drawrect", "drawcircle", "eraseshape"],
         "edits": {"shapePosition": True},
         "toImageButtonOptions": {"format": "png", "filename": "tradepoint_chart", "scale": 2}}
-_js = CHART_JS.replace("__BG__", card_bg).replace("__FG__", text_color).replace("__EDGE__", border_color)
+_js = CHART_JS.replace("__KEY__", json.dumps(f"{selected_ticker}|{selected_tf}|{show_bars}")).replace("__BG__", card_bg).replace("__FG__", text_color).replace("__EDGE__", border_color)
 _html = fig.to_html(full_html=True, include_plotlyjs="cdn", config=_cfg, post_script=_js, default_height="1400px", default_width="100%")
 _html = _html.replace("</head>", f"<style>html,body{{margin:0;padding:0;background:{bg_color};overflow:hidden}}</style></head>", 1)
 with chart_slot:
+    if dcx_on:
+        _lr = hist.iloc[-1]
+        if np.isfinite(_lr.get("DCX_past", np.nan)):
+            _n = int(_lr["DCX_len"])
+            st.caption(f"Donchian extension: lower {dcx_base}-bar channel {_lr['DCX_level']:,.2f} reaches back to an older low at {all_df['Low'].iloc[int(_lr['DCX_past'])]:,.2f} "
+                       f"({_n - dcx_base} bars beyond the window) -> auto length **{_n}**. "
+                       + ("**BUY setup active on the latest bar.**" if bool(_lr["DCX_buy"]) else "BUY setup not active on the latest bar."))
+        else:
+            st.caption("Donchian extension: no earlier candle at/below the current lower channel inside the look-back, so no auto length yet.")
     if hasattr(st, "iframe"):          # newer Streamlit
         st.iframe(_html, height=1410)
     else:                              # older Streamlit (requirements allow >=1.40)
@@ -1071,6 +1231,47 @@ with st.expander(f"📊 Signal hit-rate over ALL history ({selected_tf}, {foreca
             st.caption("Pick the rule set whose OUT-OF-SAMPLE row has the higher win rate AND higher average return with a reasonable number of signals (30+). "
                        "Fewer than ~30 signals means the difference is noise.")
 
+# ------------------------------------------------------------------ Donchian-extension BUY: how did it do on this ticker / timeframe?
+if dcx_on:
+    with st.expander(f"📊 Donchian-extension BUY signals - history check ({selected_tf}, {forecast_lead_units}-bar horizon)", expanded=False):
+        _sig = np.nonzero(all_df["DCX_buy"].fillna(False).to_numpy(bool))[0]
+        _c, _h, _l, _a = (all_df[k].to_numpy(float) for k in ("Close", "High", "Low", "ATR"))
+        _rows = []
+        for _i in _sig:
+            if _i + forecast_lead_units >= len(all_df):
+                continue
+            _j = int(all_df["DCX_past"].iloc[_i])
+            _stop = min(_l[_j], _l[_i]) - 0.25 * (_a[_i] if np.isfinite(_a[_i]) else 0)       # just under the support low
+            _risk = _c[_i] - _stop
+            if _risk <= 0:
+                continue
+            _tp, _out, _px = _c[_i] + bos_rr * _risk, "timeout", _c[_i + forecast_lead_units]
+            for _k in range(_i + 1, _i + forecast_lead_units + 1):
+                if _l[_k] <= _stop:
+                    _out, _px = "stop", _stop; break
+                if _h[_k] >= _tp:
+                    _out, _px = "target", _tp; break
+            _rows.append((_i, _out, _px / _c[_i] - 1, _c[_i + forecast_lead_units] / _c[_i] - 1))
+        if not _rows:
+            st.info("No completed signals yet on this ticker/timeframe (they need room to play out).")
+        else:
+            _d = pd.DataFrame(_rows, columns=["i", "outcome", "ret", "raw"])
+            _cut = len(all_df) * 0.6
+            def _sm(g):
+                return pd.Series({"Signals": len(g), "Target hit": f"{(g.outcome == 'target').mean():.0%}", "Stop hit": f"{(g.outcome == 'stop').mean():.0%}",
+                                  "Timeout": f"{(g.outcome == 'timeout').mean():.0%}", "Win rate (P&L>0)": f"{(g.ret > 0).mean():.0%}",
+                                  f"Avg return": f"{g.ret.mean() * 100:+.2f}%", f"Avg raw {forecast_lead_units}-bar move": f"{g.raw.mean() * 100:+.2f}%"})
+            _t = {"All signals": _sm(_d)}
+            if (_d.i <= _cut).any(): _t["First 60% of history (in-sample)"] = _sm(_d[_d.i <= _cut])
+            if (_d.i > _cut).any():  _t["Last 40% (OUT-OF-SAMPLE)"] = _sm(_d[_d.i > _cut])
+            _base = (np.roll(_c, -forecast_lead_units) / _c - 1)[:len(_c) - forecast_lead_units]
+            _t["Baseline: always long"] = pd.Series({"Signals": len(_base), "Target hit": "-", "Stop hit": "-", "Timeout": "-", "Win rate (P&L>0)": f"{(_base > 0).mean():.0%}",
+                                                     "Avg return": f"{_base.mean() * 100:+.2f}%", f"Avg raw {forecast_lead_units}-bar move": f"{_base.mean() * 100:+.2f}%"})
+            st.table(pd.DataFrame(_t).T)
+            st.caption(f"Entry at the signal candle's close, stop just under the old support low, target = {bos_rr:.1f} x risk (the 'Target = R multiple' slider), "
+                       "stop assumed first if both touch in one bar. Judge it by the OUT-OF-SAMPLE row and compare with the always-long baseline; "
+                       "fewer than ~30 signals is anecdote, not evidence.")
+
 # ------------------------------------------------------------------ real paper portfolio + real rule backtest
 st.markdown("### 💼 Paper Portfolio (from local_sandbox_portfolio.json)")
 pf = load_portfolio()
@@ -1160,4 +1361,9 @@ if replay_mode and st.session_state.get("tp_playing_now") and replay_bars_back >
     st.session_state["tp_pending"] = _nxt
     if _nxt <= 0:
         st.session_state["tp_play"] = False       # reached real-time: stop, like TradingView
+    st.rerun()
+
+# ------------------------------------------------------------------ live mode: wait out the rest of the interval, then redraw with fresh bars
+if live_active:
+    time.sleep(max(0.5, live_every - (time.time() - _T0)))
     st.rerun()

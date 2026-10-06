@@ -126,3 +126,46 @@ def compute_edge_donchian(df, length=20, n=3, min_prom_atr=0.75):
         elif i:
             lo[i], lo_bar[i] = lo[i - 1], lo_bar[i - 1]
     return pd.DataFrame({"DC_Upper": up, "DC_Lower": lo, "DC_up_bar": up_bar, "DC_lo_bar": lo_bar}, index=df.index)
+
+
+# ---------------------------------------------------------------- Donchian extension BUY setup (auto length)
+def donchian_extension_buy(df, base_len=20, min_dist=30, max_back=400, tol_atr=1.0, cooldown=5):
+    """Donchian BUY setup measured the way a trader does it by hand.
+
+    1. Start with the normal lower Donchian channel (length `base_len`, default 20): level = lowest Low of the last 20 bars.
+    2. Extend that level to the LEFT, past the 20-bar window (and at least min_dist bars back), to the nearest earlier candle whose Low is at or below it
+       (a prior low that can act as support). The bar distance from the current bar to that candle is N, and the Donchian
+       length becomes N (e.g. 20 -> 124).
+    3. With length N the old support candle is the oldest bar in the window. BUY when, on the current bar,
+         - lower Donchian(N) now  >  lower Donchian(N) one bar ago   (the old low just rolled out, the channel stepped UP), and
+         - the current candle's Low equals the lower Donchian(N)     (the candle sits on the channel edge: a higher low).
+       Extra guards: N >= min_dist, and the current low is within tol_atr x ATR of the old low (a real retest, not a random dip).
+    Only data up to the current bar is used (no look-ahead). Columns: DCX_len, DCX_past (position of the old low),
+    DCX_level (20-bar lower channel), DCX_prev, DCX_cur, DCX_buy."""
+    low = df["Low"].to_numpy(float)
+    n = len(low)
+    atr = df["ATR"].to_numpy(float) if "ATR" in df else compute_atr(df, 14).to_numpy(float)
+    ln, past, lvl_o = np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    prv, cur_o, buy = np.full(n, np.nan), np.full(n, np.nan), np.zeros(n, bool)
+    last_buy = -10 ** 9
+    for t in range(base_len, n):
+        lvl = low[t - base_len + 1:t + 1].min()
+        lo_b = max(0, t - int(max_back))
+        hi_b = t - max(int(min_dist), base_len + 1) + 1       # only bars at least `min_dist` back are eligible support candles
+        if hi_b <= lo_b:
+            continue
+        hit = np.nonzero(low[lo_b:hi_b] <= lvl)[0]
+        if hit.size == 0:
+            continue
+        j = lo_b + int(hit[-1])                               # nearest earlier candle at/below the level
+        N = t - j
+        cur = low[t - N + 1:t + 1].min()                      # lower Donchian(N) now
+        prev = low[t - N:t].min()                             # lower Donchian(N) on the previous bar (still contains bar j)
+        ln[t], past[t], lvl_o[t], prv[t], cur_o[t] = N, j, lvl, prev, cur
+        a = atr[t] if np.isfinite(atr[t]) else 0.0
+        if (cur > prev and low[t] <= cur and N >= min_dist and abs(low[t] - low[j]) <= tol_atr * a
+                and t - last_buy > cooldown):
+            buy[t] = True
+            last_buy = t
+    return pd.DataFrame({"DCX_len": ln, "DCX_past": past, "DCX_level": lvl_o, "DCX_prev": prv, "DCX_cur": cur_o, "DCX_buy": buy},
+                        index=df.index)
