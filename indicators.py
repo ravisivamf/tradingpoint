@@ -129,43 +129,57 @@ def compute_edge_donchian(df, length=20, n=3, min_prom_atr=0.75):
 
 
 # ---------------------------------------------------------------- Donchian extension BUY setup (auto length)
-def donchian_extension_buy(df, base_len=20, min_dist=30, max_back=400, tol_atr=1.0, cooldown=5):
-    """Donchian BUY setup measured the way a trader does it by hand.
+def donchian_extension_buy(df, base_len=20, min_dist=30, max_back=400, tol_atr=0.5, cooldown=15,
+                           pivot_n=5, rally_atr=3.0, reject=True, confirm=True, trend_guard=False):
+    """Donchian BUY setup measured the way a trader does it by hand, with strict quality filters (fewer, cleaner signals).
 
-    1. Start with the normal lower Donchian channel (length `base_len`, default 20): level = lowest Low of the last 20 bars.
-    2. Extend that level to the LEFT, past the 20-bar window (and at least min_dist bars back), to the nearest earlier candle whose Low is at or below it
-       (a prior low that can act as support). The bar distance from the current bar to that candle is N, and the Donchian
-       length becomes N (e.g. 20 -> 124).
-    3. With length N the old support candle is the oldest bar in the window. BUY when, on the current bar,
-         - lower Donchian(N) now  >  lower Donchian(N) one bar ago   (the old low just rolled out, the channel stepped UP), and
-         - the current candle's Low equals the lower Donchian(N)     (the candle sits on the channel edge: a higher low).
-       Extra guards: N >= min_dist, and the current low is within tol_atr x ATR of the old low (a real retest, not a random dip).
-    Only data up to the current bar is used (no look-ahead). Columns: DCX_len, DCX_past (position of the old low),
-    DCX_level (20-bar lower channel), DCX_prev, DCX_cur, DCX_buy."""
-    low = df["Low"].to_numpy(float)
+    1. Level = lowest Low of the last `base_len` bars (the normal lower Donchian, default 20).
+    2. Extend it LEFT (at least min_dist bars back) to the nearest earlier candle that is a REAL support:
+         - its Low is at/below the level,
+         - it is a confirmed swing low (lowest of pivot_n bars each side),
+         - price rallied at least rally_atr x ATR above it afterwards (a genuine bounce, not a flat drift),
+         - price never closed below it... i.e. no later Low undercut it (support still intact).
+       N = bar distance to that candle becomes the Donchian length (e.g. 20 -> 124).
+    3. BUY when lower Donchian(N) stepped UP versus one bar ago (old low rolled out), the current Low sits on the channel edge,
+       the current Low is a HIGHER low within tol_atr x ATR of the old low (a tight retest), and (optional) the candle rejects
+       the level: it closes in its upper half. One signal per support (the same old low is never reused) plus a cooldown.
+    No look-ahead. Columns: DCX_len, DCX_past, DCX_level, DCX_prev, DCX_cur, DCX_buy."""
+    low = df["Low"].to_numpy(float); high = df["High"].to_numpy(float)
+    close = df["Close"].to_numpy(float); op = df["Open"].to_numpy(float)
     n = len(low)
     atr = df["ATR"].to_numpy(float) if "ATR" in df else compute_atr(df, 14).to_numpy(float)
     ln, past, lvl_o = np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
     prv, cur_o, buy = np.full(n, np.nan), np.full(n, np.nan), np.zeros(n, bool)
-    last_buy = -10 ** 9
+    last_buy, used = -10 ** 9, set()
+    pn = int(pivot_n)
+    ema = pd.Series(close).ewm(span=50, adjust=False).mean().to_numpy()
     for t in range(base_len, n):
         lvl = low[t - base_len + 1:t + 1].min()
-        lo_b = max(0, t - int(max_back))
-        hi_b = t - max(int(min_dist), base_len + 1) + 1       # only bars at least `min_dist` back are eligible support candles
+        lo_b = max(pn, t - int(max_back))
+        hi_b = t - max(int(min_dist), base_len + 1) + 1
         if hi_b <= lo_b:
             continue
-        hit = np.nonzero(low[lo_b:hi_b] <= lvl)[0]
-        if hit.size == 0:
-            continue
-        j = lo_b + int(hit[-1])                               # nearest earlier candle at/below the level
-        N = t - j
-        cur = low[t - N + 1:t + 1].min()                      # lower Donchian(N) now
-        prev = low[t - N:t].min()                             # lower Donchian(N) on the previous bar (still contains bar j)
-        ln[t], past[t], lvl_o[t], prv[t], cur_o[t] = N, j, lvl, prev, cur
         a = atr[t] if np.isfinite(atr[t]) else 0.0
-        if (cur > prev and low[t] <= cur and N >= min_dist and abs(low[t] - low[j]) <= tol_atr * a
-                and t - last_buy > cooldown):
-            buy[t] = True
-            last_buy = t
+        j = -1
+        for jj in (lo_b + np.nonzero(low[lo_b:hi_b] <= lvl)[0])[::-1]:        # nearest first
+            if low[jj - pn:jj + pn + 1].min() < low[jj]:                       # must be a swing low
+                continue
+            if high[jj:t + 1].max() - low[jj] < rally_atr * a:                 # must have bounced
+                continue
+            if low[jj + 1:t + 1].min() < low[jj]:                              # support must still be intact
+                continue
+            j = int(jj); break
+        if j < 0:
+            continue
+        N = t - j
+        cur = low[t - N + 1:t + 1].min(); prev = low[t - N:t].min()
+        ln[t], past[t], lvl_o[t], prv[t], cur_o[t] = N, j, lvl, prev, cur
+        rng = high[t] - low[t]
+        ok_rej = (not reject) or (rng > 0 and close[t] >= low[t] + 0.5 * rng)
+        ok_conf = (not confirm) or (t > 0 and close[t] > op[t] and close[t] > close[t - 1])   # bullish confirmation: green candle closing above the previous close
+        ok_trend = (not trend_guard) or (t >= 10 and ema[t] >= ema[t - 10])  # not buying into a falling 50-EMA
+        if (cur > prev and low[t] <= cur and N >= min_dist and 0 <= low[t] - low[j] <= tol_atr * a
+                and ok_rej and ok_conf and ok_trend and j not in used and t - last_buy > cooldown):
+            buy[t] = True; last_buy = t; used.add(j)
     return pd.DataFrame({"DCX_len": ln, "DCX_past": past, "DCX_level": lvl_o, "DCX_prev": prv, "DCX_cur": cur_o, "DCX_buy": buy},
                         index=df.index)
