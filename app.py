@@ -47,7 +47,7 @@ from fetch_news import get_news_detail
 from indicators import (auto_edge_donchian, compute_adx_engine, compute_atr, compute_edge_donchian, compute_institutional_pivots,
                         compute_rsi, compute_zero_lag_ema, get_auto_donchian_length)
 try:
-    from indicators import donchian_extension_buy
+    from indicators import donchian_extension_steps as donchian_extension_buy      # two-step BUY/SELL, same logic as the TradingView script
 except ImportError:          # indicators.py in the repo is older than app.py: keep the app running, switch the new signal off
     donchian_extension_buy = None
 from prepare_data import APP_DIR
@@ -267,8 +267,8 @@ else:
     length_DC = st.sidebar.slider("Manual Donchian Channel Lookback", 2, 100, 20)
     dc_n = st.sidebar.slider("Edge swing strength (bars each side)", 2, 8, 3)
 
-st.sidebar.markdown("#### Donchian Extension BUY (auto length)")
-dcx_on = st.sidebar.checkbox("Show Donchian-extension BUY signals", value=donchian_extension_buy is not None, disabled=donchian_extension_buy is None,
+st.sidebar.markdown("#### Donchian Extension BUY / SELL (auto length, 2 steps)")
+dcx_on = st.sidebar.checkbox("Show Donchian-extension BUY / SELL signals", value=donchian_extension_buy is not None, disabled=donchian_extension_buy is None,
     help="Starts with a 20-bar lower Donchian, extends it left to the nearest earlier candle at/below it (e.g. 104 bars further -> length 124), "
          "and signals BUY when that old low rolls out (lower channel steps UP) and the current candle's Low sits on the lower channel.")
 if donchian_extension_buy is None:
@@ -276,21 +276,26 @@ if donchian_extension_buy is None:
 dcx_on = dcx_on and donchian_extension_buy is not None
 dcx_base = st.sidebar.slider("Initial Donchian length", 5, 60, 20)
 dcx_min = st.sidebar.slider("Old low must be at least this many bars back", 21, 200, 30)
-dcx_conf = st.sidebar.checkbox("Require confirmation (green candle closing above previous close)", value=True,
-    help="Filters falling-knife signals: the signal candle must be green and close above the previous close.")
+dcx_rsi_os = st.sidebar.slider("Step 2: BUY when RSI(14) is at or below", 5, 50, 30,
+    help="STEP 1 = the 8 channel checks pass (touch of the old-low channel edge). STEP 2 = RSI confirms, on the same candle or any later candle while the touch is still valid.")
+dcx_rsi_ob = st.sidebar.slider("Step 2: SELL when RSI(14) is at or above", 50, 95, 70)
+dcx_conf = False
 dcx_trend = st.sidebar.checkbox("Trend guard (no BUY while the 50-EMA is falling)", value=False)
-dcx_preset = st.sidebar.selectbox("Signal strictness", ["Balanced", "Strict", "Loose", "Custom"], index=0,
-    help="Strict = fewest signals, Balanced = default, Loose = most signals, Custom = use the sliders below.")
-_PRE = {"Strict": (0.5, 5, 3.0, True, 15), "Balanced": (1.5, 3, 2.0, True, 10), "Loose": (3.0, 2, 1.0, False, 5)}
+dcx_preset = st.sidebar.selectbox("Signal strictness", ["Balanced", "Strict", "Loose", "Original (3 raw rules, noisy)", "Custom"], index=0,
+    help="Strict = fewest signals, Balanced = default, Loose = most signals, Original = the 3 raw rules only (fires on almost every channel touch in a trend), Custom = use the sliders below.")
+_PRE = {"Strict": (0.5, 5, 3.0, True, 15), "Balanced": (1.5, 3, 2.0, False, 8), "Loose": (3.0, 2, 1.0, False, 4)}
 _cust = dcx_preset == "Custom"
 dcx_tol = st.sidebar.slider("Current low within (x ATR) above the old low", 0.1, 3.0, 1.5, 0.1, disabled=not _cust)
 dcx_piv = st.sidebar.slider("Old low must be a swing low (bars each side)", 2, 10, 3, disabled=not _cust)
 dcx_rally = st.sidebar.slider("Bounce after old low (x ATR)", 0.0, 8.0, 2.0, 0.5, disabled=not _cust)
-dcx_rej = st.sidebar.checkbox("Require rejection candle (closes in upper half)", value=True, disabled=not _cust)
-dcx_cd = st.sidebar.slider("Minimum bars between signals", 0, 60, 10, disabled=not _cust)
+dcx_rej = st.sidebar.checkbox("Require rejection candle (closes in upper half for BUY, lower half for SELL)", value=False, disabled=not _cust)
+dcx_cd = st.sidebar.slider("Minimum bars between signals", 0, 60, 8, disabled=not _cust)
+dcx_plain = dcx_preset.startswith("Original")
+if dcx_plain:
+    dcx_conf = dcx_trend = False
 if not _cust:
-    dcx_tol, dcx_piv, dcx_rally, dcx_rej, dcx_cd = _PRE[dcx_preset]
-dcx_back = st.sidebar.slider("Look back at most (bars)", 100, 1000, 400, 50)
+    dcx_tol, dcx_piv, dcx_rally, dcx_rej, dcx_cd = _PRE.get(dcx_preset, _PRE["Balanced"])
+dcx_back = st.sidebar.slider("Look back at most (bars)", 100, 1500, 1500, 50)
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🧱 Structure Marks (BOS / CHoCH) - chart only")
 show_bos = st.sidebar.checkbox("Show BOS / CHoCH marks", value=True)
@@ -436,7 +441,8 @@ else:
     all_df["DC_lo_bar"] = np.nan
 if dcx_on:
     _dcx = donchian_extension_buy(all_df, base_len=dcx_base, min_dist=max(dcx_min, dcx_base + 1), max_back=dcx_back, tol_atr=dcx_tol,
-                                   cooldown=dcx_cd, pivot_n=dcx_piv, rally_atr=dcx_rally, reject=dcx_rej, confirm=dcx_conf, trend_guard=dcx_trend)
+                                   cooldown=dcx_cd, pivot_n=dcx_piv, rally_atr=dcx_rally, reject=dcx_rej, confirm=dcx_conf, trend_guard=dcx_trend, plain=dcx_plain,
+                                   rsi_os=float(dcx_rsi_os), rsi_ob=float(dcx_rsi_ob))
     for _c in _dcx.columns:
         all_df[_c] = _dcx[_c]
 # structural walls: PRIOR N bars, current bar excluded (identical to optimize_pipeline.py)
@@ -923,22 +929,43 @@ if toggle_pivots:
         _pivot_levels.append(val)
 if dcx_on:
     _start = len(hist) - len(df)                                   # position of the first visible bar inside all_df
-    _vis = df[df["DCX_buy"] == True].tail(1)          # only the LATEST BUY; earlier ones are seen in Bar Replay
-    for _ts, _r in _vis.iterrows():
-        _t = all_df.index.get_loc(_ts)
-        _j = int(_r["DCX_past"])
-        _x0 = timeline_x[max(_j - _start, 0)]
-        _old = float(all_df["Low"].iloc[_j])
-        fig.add_trace(go.Scatter(x=[_x0, _ts.strftime(fmt)], y=[_old, _old], mode="lines", line=dict(color="#00E676", width=1.5, dash="dot"),
-                                 hoverinfo="skip", showlegend=False), row=1, col=1)
-        if _j >= _start:
-            fig.add_trace(go.Scatter(x=[timeline_x[_j - _start]], y=[_old], mode="markers", marker=dict(symbol="circle-open", size=11, color="#00E676", line=dict(width=2)),
-                                     hovertemplate=f"old support low {_old:,.2f}<extra></extra>", showlegend=False), row=1, col=1)
-    if len(_vis):
-        fig.add_trace(go.Scatter(x=[ts.strftime(fmt) for ts in _vis.index], y=_vis["Low"] - 1.0 * df.loc[_vis.index, "ATR"].fillna(0),
-                                 mode="markers+text", text=[f"BUY<br>DC {int(n_)}" for n_ in _vis["DCX_len"]], textposition="bottom center", textfont=dict(size=11, color="#00E676"),
-                                 marker=dict(symbol="triangle-up", size=20, color="#00E676", line=dict(width=1, color="#FFFFFF")),
-                                 hovertemplate="Donchian-extension BUY<br>auto length %{text}<extra></extra>", name="Donchian-ext BUY"), row=1, col=1)
+    # show only the LATEST signal group: a new BUY step 1/2 invalidates earlier SELL marks and vice versa (earlier ones: Bar Replay)
+    def _marks(*cols):
+        _m = np.zeros(len(hist), bool)
+        for _c_ in cols:
+            _m |= hist[_c_].fillna(False).to_numpy(bool)
+        return np.nonzero(_m)[0]
+    _mb, _ms = _marks("DCX_s1_buy", "DCX_buy"), _marks("DCX_s1_sell", "DCX_sell")
+    _lb, _ls = (_mb[-1] if len(_mb) else -1), (_ms[-1] if len(_ms) else -1)
+    if max(_lb, _ls) >= 0:
+        _side = "BUY" if _lb > _ls else "SELL"
+        _s1c, _s2c, _pc, _lc = (("DCX_s1_buy", "DCX_buy", "DCX_arm_past", "DCX_arm_len") if _side == "BUY"
+                                else ("DCX_s1_sell", "DCX_sell", "DCXS_arm_past", "DCXS_arm_len"))
+        _opp = _ls if _side == "BUY" else _lb
+        _col, _sym, _yoff = ("#00E676", "triangle-up", -1.0) if _side == "BUY" else ("#FF5252", "triangle-down", 1.0)
+        _i1 = [i for i in np.nonzero(hist[_s1c].fillna(False).to_numpy(bool))[0] if i > _opp]
+        _i2 = [i for i in np.nonzero(hist[_s2c].fillna(False).to_numpy(bool))[0] if i > _opp]
+        _i1, _i2 = _i1[-1:], _i2[-1:]
+        for _lst, _step in ((_i1, 1), (_i2, 2)):
+            for _t in _lst:
+                if _t < _start:
+                    continue
+                _ts = all_df.index[_t]
+                _y = float(all_df["Low"].iloc[_t] if _side == "BUY" else all_df["High"].iloc[_t])
+                _a = float(all_df["ATR"].iloc[_t]) if np.isfinite(all_df["ATR"].iloc[_t]) else 0.0
+                _dc = int(all_df[_lc].iloc[_t]) if np.isfinite(all_df[_lc].iloc[_t]) else 0
+                fig.add_trace(go.Scatter(x=[_ts.strftime(fmt)], y=[_y + _yoff * (0.6 if _step == 1 else 1.0) * _a],
+                                         mode="markers+text", text=[f"{_side} step {_step}" + (f"<br>DC {_dc}" if _step == 2 else "")],
+                                         textposition="bottom center" if _side == "BUY" else "top center", textfont=dict(size=11 if _step == 2 else 9, color=_col),
+                                         marker=dict(symbol=_sym if _step == 2 else _sym + "-open", size=20 if _step == 2 else 12, color=_col, line=dict(width=1.5, color="#FFFFFF" if _step == 2 else _col)),
+                                         hovertemplate=f"{_side} step {_step}<extra></extra>", name=f"Donchian-ext {_side} step {_step}"), row=1, col=1)
+        _tt = (_i2 or _i1 or [None])[-1]
+        if _tt is not None and np.isfinite(all_df[_pc].iloc[_tt]):
+            _j = int(all_df[_pc].iloc[_tt])
+            _x0 = timeline_x[max(_j - _start, 0)]
+            _old = float(all_df["Low"].iloc[_j] if _side == "BUY" else all_df["High"].iloc[_j])
+            fig.add_trace(go.Scatter(x=[_x0, all_df.index[_tt].strftime(fmt)], y=[_old, _old], mode="lines", line=dict(color=_col, width=1.5, dash="dot"),
+                                     hoverinfo="skip", showlegend=False), row=1, col=1)
     # preview for the LATEST bar: the 20-bar lower channel extended left to the old low (what you would measure by hand)
     _lr = hist.iloc[-1]
     if np.isfinite(_lr.get("DCX_past", np.nan)):
@@ -1106,7 +1133,9 @@ with chart_slot:
             _n = int(_lr["DCX_len"])
             st.caption(f"Donchian extension: lower {dcx_base}-bar channel {_lr['DCX_level']:,.2f} reaches back to an older low at {all_df['Low'].iloc[int(_lr['DCX_past'])]:,.2f} "
                        f"({_n - dcx_base} bars beyond the window) -> auto length **{_n}**. "
-                       + ("**BUY setup active on the latest bar.**" if bool(_lr["DCX_buy"]) else "BUY setup not active on the latest bar."))
+                       + ("**BUY step 2 on the latest bar.**" if bool(_lr["DCX_buy"]) else "**BUY step 1 (touch) on the latest bar - waiting for RSI.**" if bool(_lr["DCX_s1_buy"])
+                          else "**SELL step 2 on the latest bar.**" if bool(_lr["DCX_sell"]) else "**SELL step 1 (touch) on the latest bar - waiting for RSI.**" if bool(_lr["DCX_s1_sell"])
+                          else "No step 1/2 signal on the latest bar."))
         else:
             st.caption("Donchian extension: no earlier candle at/below the current lower channel inside the look-back, so no auto length yet.")
     if hasattr(st, "iframe"):          # newer Streamlit
@@ -1260,7 +1289,7 @@ if dcx_on:
         for _i in _sig:
             if _i + forecast_lead_units >= len(all_df):
                 continue
-            _j = int(all_df["DCX_past"].iloc[_i])
+            _j = int(all_df["DCX_arm_past"].iloc[_i])
             _stop = min(_l[_j], _l[_i]) - 0.25 * (_a[_i] if np.isfinite(_a[_i]) else 0)       # just under the support low
             _risk = _c[_i] - _stop
             if _risk <= 0:
