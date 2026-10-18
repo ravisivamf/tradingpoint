@@ -279,8 +279,8 @@ dcx_min = st.sidebar.slider("Old low must be at least this many bars back", 21, 
 dcx_conf = st.sidebar.checkbox("Require confirmation (green candle closing above previous close)", value=True,
     help="Filters falling-knife signals: the signal candle must be green and close above the previous close.")
 dcx_trend = st.sidebar.checkbox("Trend guard (no BUY while the 50-EMA is falling)", value=False)
-dcx_preset = st.sidebar.selectbox("Signal strictness", ["Balanced", "Strict", "Loose", "Custom"], index=0,
-    help="Strict = fewest signals, Balanced = default, Loose = most signals, Custom = use the sliders below.")
+dcx_preset = st.sidebar.selectbox("Signal strictness", ["Balanced", "Strict", "Loose", "Original (3 raw rules, noisy)", "Custom"], index=0,
+    help="Strict = fewest signals, Balanced = default, Loose = most signals, Original = the 3 raw rules only (fires on almost every channel touch in a trend), Custom = use the sliders below.")
 _PRE = {"Strict": (0.5, 5, 3.0, True, 15), "Balanced": (1.5, 3, 2.0, True, 10), "Loose": (3.0, 2, 1.0, False, 5)}
 _cust = dcx_preset == "Custom"
 dcx_tol = st.sidebar.slider("Current low within (x ATR) above the old low", 0.1, 3.0, 1.5, 0.1, disabled=not _cust)
@@ -288,9 +288,12 @@ dcx_piv = st.sidebar.slider("Old low must be a swing low (bars each side)", 2, 1
 dcx_rally = st.sidebar.slider("Bounce after old low (x ATR)", 0.0, 8.0, 2.0, 0.5, disabled=not _cust)
 dcx_rej = st.sidebar.checkbox("Require rejection candle (closes in upper half)", value=True, disabled=not _cust)
 dcx_cd = st.sidebar.slider("Minimum bars between signals", 0, 60, 10, disabled=not _cust)
+dcx_plain = dcx_preset.startswith("Original")
+if dcx_plain:
+    dcx_conf = dcx_trend = False
 if not _cust:
-    dcx_tol, dcx_piv, dcx_rally, dcx_rej, dcx_cd = _PRE[dcx_preset]
-dcx_back = st.sidebar.slider("Look back at most (bars)", 100, 1000, 400, 50)
+    dcx_tol, dcx_piv, dcx_rally, dcx_rej, dcx_cd = _PRE.get(dcx_preset, _PRE["Balanced"])
+dcx_back = st.sidebar.slider("Look back at most (bars)", 100, 1500, 1500, 50)
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🧱 Structure Marks (BOS / CHoCH) - chart only")
 show_bos = st.sidebar.checkbox("Show BOS / CHoCH marks", value=True)
@@ -436,7 +439,7 @@ else:
     all_df["DC_lo_bar"] = np.nan
 if dcx_on:
     _dcx = donchian_extension_buy(all_df, base_len=dcx_base, min_dist=max(dcx_min, dcx_base + 1), max_back=dcx_back, tol_atr=dcx_tol,
-                                   cooldown=dcx_cd, pivot_n=dcx_piv, rally_atr=dcx_rally, reject=dcx_rej, confirm=dcx_conf, trend_guard=dcx_trend)
+                                   cooldown=dcx_cd, pivot_n=dcx_piv, rally_atr=dcx_rally, reject=dcx_rej, confirm=dcx_conf, trend_guard=dcx_trend, plain=dcx_plain)
     for _c in _dcx.columns:
         all_df[_c] = _dcx[_c]
 # structural walls: PRIOR N bars, current bar excluded (identical to optimize_pipeline.py)
