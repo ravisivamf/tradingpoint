@@ -130,7 +130,7 @@ def compute_edge_donchian(df, length=20, n=3, min_prom_atr=0.75):
 
 # ---------------------------------------------------------------- Donchian extension BUY setup (auto length)
 def donchian_extension_buy(df, base_len=20, min_dist=30, max_back=400, tol_atr=0.5, cooldown=15,
-                           pivot_n=5, rally_atr=3.0, reject=True, confirm=True, trend_guard=False, plain=False):
+                           pivot_n=5, rally_atr=3.0, reject=True, confirm=True, trend_guard=False):
     """Donchian BUY setup measured the way a trader does it by hand, with strict quality filters (fewer, cleaner signals).
 
     1. Level = lowest Low of the last `base_len` bars (the normal lower Donchian, default 20).
@@ -161,11 +161,7 @@ def donchian_extension_buy(df, base_len=20, min_dist=30, max_back=400, tol_atr=0
             continue
         a = atr[t] if np.isfinite(atr[t]) else 0.0
         j = -1
-        if plain:                                                          # the 3 original rules only: nearest earlier candle at/below the level
-            _h = np.nonzero(low[lo_b:hi_b] <= lvl)[0]
-            if _h.size:
-                j = lo_b + int(_h[-1])
-        for jj in (() if plain else (lo_b + np.nonzero(low[lo_b:hi_b] <= lvl)[0])[::-1]):        # nearest first
+        for jj in (lo_b + np.nonzero(low[lo_b:hi_b] <= lvl)[0])[::-1]:        # nearest first
             if low[jj - pn:jj + pn + 1].min() < low[jj]:                       # must be a swing low
                 continue
             if high[jj:t + 1].max() - low[jj] < rally_atr * a:                 # must have bounced
@@ -182,10 +178,6 @@ def donchian_extension_buy(df, base_len=20, min_dist=30, max_back=400, tol_atr=0
         ok_rej = (not reject) or (rng > 0 and close[t] >= low[t] + 0.5 * rng)
         ok_conf = (not confirm) or (t > 0 and close[t] > op[t] and close[t] > close[t - 1])   # bullish confirmation: green candle closing above the previous close
         ok_trend = (not trend_guard) or (t >= 10 and ema[t] >= ema[t - 10])  # not buying into a falling 50-EMA
-        if plain:
-            if cur > prev and low[t] <= cur and N >= min_dist:
-                buy[t] = True
-            continue
         if (cur > prev and low[t] <= cur and N >= min_dist and 0 <= low[t] - low[j] <= tol_atr * a
                 and ok_rej and ok_conf and ok_trend and j not in used and t - last_buy > cooldown):
             buy[t] = True; last_buy = t; used.add(j)
