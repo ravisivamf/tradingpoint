@@ -226,7 +226,7 @@ def _dcx_find_old(low, high, t, lvl, a, lo_b, hi_b, pn, rally_atr, plain, lowsid
 
 
 def donchian_extension_steps(df, base_len=20, min_dist=30, max_back=1500, tol_atr=1.5, cooldown=8, pivot_n=3, rally_atr=2.0,
-                             reject=False, trend_guard=False, plain=False, rsi_os=30.0, rsi_ob=70.0, rsi_now=True, wait_bars=0, **_ignored):
+                             reject=False, trend_guard=False, plain=False, rsi_os=30.0, rsi_ob=70.0, rsi_now=True, wait_bars=0, pullback_atr=2.0, **_ignored):
     """Two-step BUY / SELL, the same state machine as the TradingView script.
     STEP 1 (touch): the 8 checks pass - old swing level found, channel stepped (old level rolled out), bar touches the channel edge,
        within tol_atr x ATR of the old level, rejection candle (optional), trend guard (optional), old level not already used, cooldown.
@@ -234,7 +234,11 @@ def donchian_extension_steps(df, base_len=20, min_dist=30, max_back=1500, tol_at
     STEP 2 (confirmation): RSI(14) <= rsi_os for BUY (>= rsi_ob for SELL), on the touch candle itself or any later candle while armed.
        A step 2 is only valid while its step 1 is valid: any BUY/SELL step 1 or 2 on the other side cancels the pending step 1.
     Columns: DCX_len/past/level/prev/cur (current-bar preview of the BUY side), DCX_s1_buy, DCX_buy (= BUY step 2), DCX_arm_past/DCX_arm_len
-    (old low behind a BUY step 1/2), DCXS_len/past (SELL side), DCX_s1_sell, DCX_sell (= SELL step 2), DCXS_arm_past/DCXS_arm_len. No look-ahead."""
+    (old low behind a BUY step 1/2), DCXS_len/past (SELL side), DCX_s1_sell, DCX_sell (= SELL step 2), DCXS_arm_past/DCXS_arm_len.
+    DC-RULE signal (no extra checks, no RSI): old level + stepped channel + edge touch only, kept only if the touch HOLDS and price pulls back
+    pullback_atr x ATR from it (0 = on the touch bar). Columns, all stamped on the CONFIRMATION bar (no look-ahead): DCR_buy / DCR_sell (bool),
+    DCR_buy_bar / DCR_sell_bar (bar position of the touch candle to draw on), DCR_buy_past / DCR_sell_past (old level candle), DCR_buy_len / DCR_sell_len.
+    No look-ahead."""
     low = df["Low"].to_numpy(float); high = df["High"].to_numpy(float); close = df["Close"].to_numpy(float)
     n = len(low)
     atr = df["ATR"].to_numpy(float) if "ATR" in df else compute_atr(df, 14).to_numpy(float)
@@ -250,6 +254,9 @@ def donchian_extension_steps(df, base_len=20, min_dist=30, max_back=1500, tol_at
     used_b, used_s = None, None                                      # lastBuyPiv / lastSellPiv (index of the last used old low/high)
     arm_b = None; arm_s = None                                       # [extreme, bar, old_idx, N, rsi_min/max]
     s1_on_b = s1_on_s = False                                        # display flags of the Pine script (step 1 waiting)
+    r_b, r_s = np.zeros(n, bool), np.zeros(n, bool)                  # DC-rule confirmed on this bar
+    r_bbar, r_bpast, r_blen, r_sbar, r_spast, r_slen = nan(), nan(), nan(), nan(), nan(), nan()
+    pend_b = pend_s = None                                           # pending DC-rule touch: [extreme, bar, old_idx, N, atr]
     cd = int(cooldown)
     for t in range(base_len, n):
         a = atr[t] if np.isfinite(atr[t]) else 0.0
@@ -279,6 +286,32 @@ def donchian_extension_steps(df, base_len=20, min_dist=30, max_back=1500, tol_at
             fresh = plain or (jh != used_s)
             tol = plain or (0 <= high[jh] - high[t] <= tol_atr * a)
             sell_raw = cur < prev and high[t] >= cur and NH >= min_dist and tol and (plain or (rej and trend and fresh))
+        # ---------------- DC-RULE (3 plain rules + final pull-back confirmation)
+        pure_b = jl >= 0 and (b_cur[t] > b_prev[t]) and low[t] <= b_cur[t] and NL >= min_dist
+        pure_s = False
+        if jh >= 0:
+            _ch = high[t - NH + 1:t + 1].max(); _ph = high[t - NH:t].max()
+            pure_s = (_ch < _ph) and high[t] >= _ch and NH >= min_dist
+        if pend_b is not None:
+            if t > pend_b[1] and low[t] < pend_b[0]:
+                pend_b = None
+            elif pullback_atr == 0 or (t > pend_b[1] and high[t] - pend_b[0] >= pullback_atr * pend_b[4]):
+                r_b[t] = True; r_bbar[t], r_bpast[t], r_blen[t] = pend_b[1], pend_b[2], pend_b[3]
+                pend_b = None; pend_s = None                         # a confirmed DC-rule BUY cancels a pending SELL touch
+        if pure_b and pend_b is None and not r_b[t]:
+            pend_b = [low[t], t, jl, NL, a]
+            if pullback_atr == 0:
+                r_b[t] = True; r_bbar[t], r_bpast[t], r_blen[t] = t, jl, NL; pend_b = None; pend_s = None
+        if pend_s is not None:
+            if t > pend_s[1] and high[t] > pend_s[0]:
+                pend_s = None
+            elif pullback_atr == 0 or (t > pend_s[1] and pend_s[0] - low[t] >= pullback_atr * pend_s[4]):
+                r_s[t] = True; r_sbar[t], r_spast[t], r_slen[t] = pend_s[1], pend_s[2], pend_s[3]
+                pend_s = None; pend_b = None
+        if pure_s and pend_s is None and not r_s[t]:
+            pend_s = [high[t], t, jh, NH, a]
+            if pullback_atr == 0:
+                r_s[t] = True; r_sbar[t], r_spast[t], r_slen[t] = t, jh, NH; pend_s = None; pend_b = None
         # ---------------- BUY side
         cd_buy = t - last_buy > cd
         buy_touch = buy_raw and cd_buy
@@ -343,4 +376,6 @@ def donchian_extension_steps(df, base_len=20, min_dist=30, max_back=1500, tol_at
     return pd.DataFrame({"DCX_len": b_len, "DCX_past": b_past, "DCX_level": b_lvl, "DCX_prev": b_prev, "DCX_cur": b_cur,
                          "DCX_s1_buy": s1_b, "DCX_buy": s2_b, "DCX_arm_past": b_apast, "DCX_arm_len": b_alen,
                          "DCXS_len": s_len, "DCXS_past": s_past, "DCX_s1_sell": s1_s, "DCX_sell": s2_s,
-                         "DCXS_arm_past": s_apast, "DCXS_arm_len": s_alen}, index=df.index)
+                         "DCXS_arm_past": s_apast, "DCXS_arm_len": s_alen,
+                         "DCR_buy": r_b, "DCR_buy_bar": r_bbar, "DCR_buy_past": r_bpast, "DCR_buy_len": r_blen,
+                         "DCR_sell": r_s, "DCR_sell_bar": r_sbar, "DCR_sell_past": r_spast, "DCR_sell_len": r_slen}, index=df.index)

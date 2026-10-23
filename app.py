@@ -280,6 +280,10 @@ dcx_rsi_os = st.sidebar.slider("Step 2: BUY when RSI(14) is at or below", 5, 50,
     help="STEP 1 = the 8 channel checks pass (touch of the old-low channel edge). STEP 2 = RSI confirms, on the same candle or any later candle while the touch is still valid.")
 dcx_rsi_ob = st.sidebar.slider("Step 2: SELL when RSI(14) is at or above", 50, 95, 70)
 dcx_conf = False
+dcr_on = st.sidebar.checkbox("Also show DC-rule BUY / SELL (no extra checks, no RSI)", value=True,
+    help="Only your 3 plain rules: old level found + channel stepped + low (high) on the channel edge, kept only if the touch HOLDS and price pulls back away from it. "
+         "Drawn on the touch candle once the pull-back is confirmed (a few candles later).")
+dcr_pb = st.sidebar.slider("DC-rule: pull-back needed (x ATR, 0 = on the touch candle)", 0.0, 5.0, 2.0, 0.5, disabled=not dcr_on)
 dcx_trend = st.sidebar.checkbox("Trend guard (no BUY while the 50-EMA is falling)", value=False)
 dcx_preset = st.sidebar.selectbox("Signal strictness", ["Balanced", "Strict", "Loose", "Original (3 raw rules, noisy)", "Custom"], index=0,
     help="Strict = fewest signals, Balanced = default, Loose = most signals, Original = the 3 raw rules only (fires on almost every channel touch in a trend), Custom = use the sliders below.")
@@ -442,7 +446,7 @@ else:
 if dcx_on:
     _dcx = donchian_extension_buy(all_df, base_len=dcx_base, min_dist=max(dcx_min, dcx_base + 1), max_back=dcx_back, tol_atr=dcx_tol,
                                    cooldown=dcx_cd, pivot_n=dcx_piv, rally_atr=dcx_rally, reject=dcx_rej, confirm=dcx_conf, trend_guard=dcx_trend, plain=dcx_plain,
-                                   rsi_os=float(dcx_rsi_os), rsi_ob=float(dcx_rsi_ob))
+                                   rsi_os=float(dcx_rsi_os), rsi_ob=float(dcx_rsi_ob), pullback_atr=float(dcr_pb))
     for _c in _dcx.columns:
         all_df[_c] = _dcx[_c]
 # structural walls: PRIOR N bars, current bar excluded (identical to optimize_pipeline.py)
@@ -966,6 +970,27 @@ if dcx_on:
             _old = float(all_df["Low"].iloc[_j] if _side == "BUY" else all_df["High"].iloc[_j])
             fig.add_trace(go.Scatter(x=[_x0, all_df.index[_tt].strftime(fmt)], y=[_old, _old], mode="lines", line=dict(color=_col, width=1.5, dash="dot"),
                                      hoverinfo="skip", showlegend=False), row=1, col=1)
+    # DC-rule BUY / SELL (3 plain rules, final pull-back): latest confirmed one only; drawn on the touch candle once the pull-back is known
+    if dcr_on and "DCR_buy" in hist.columns:
+        _cb = np.nonzero(hist["DCR_buy"].fillna(False).to_numpy(bool))[0]
+        _cs = np.nonzero(hist["DCR_sell"].fillna(False).to_numpy(bool))[0]
+        _lcb, _lcs = (_cb[-1] if len(_cb) else -1), (_cs[-1] if len(_cs) else -1)
+        if max(_lcb, _lcs) >= 0:
+            _sd = "BUY" if _lcb > _lcs else "SELL"
+            _ci = _lcb if _sd == "BUY" else _lcs
+            _p = "DCR_buy" if _sd == "BUY" else "DCR_sell"
+            _tb, _oj, _dn = int(hist[_p + "_bar"].iloc[_ci]), int(hist[_p + "_past"].iloc[_ci]), int(hist[_p + "_len"].iloc[_ci])
+            if _tb >= _start:
+                _clr = "#18FFFF" if _sd == "BUY" else "#FFAB40"
+                _ya = float(hist["ATR"].iloc[_tb]) if np.isfinite(hist["ATR"].iloc[_tb]) else 0.0
+                _yv = float(hist["Low"].iloc[_tb] - 1.6 * _ya) if _sd == "BUY" else float(hist["High"].iloc[_tb] + 1.6 * _ya)
+                fig.add_trace(go.Scatter(x=[hist.index[_tb].strftime(fmt)], y=[_yv], mode="markers+text", text=[f"{_sd} (DC rule)<br>DC {_dn}"],
+                                         textposition="bottom center" if _sd == "BUY" else "top center", textfont=dict(size=11, color=_clr),
+                                         marker=dict(symbol="triangle-up" if _sd == "BUY" else "triangle-down", size=20, color=_clr, line=dict(width=1, color="#FFFFFF")),
+                                         hovertemplate=f"{_sd} (DC rule): old level + stepped channel + edge touch, pull-back confirmed<extra></extra>", name=f"DC-rule {_sd}"), row=1, col=1)
+                _old = float(hist["Low"].iloc[_oj] if _sd == "BUY" else hist["High"].iloc[_oj])
+                fig.add_trace(go.Scatter(x=[timeline_x[max(_oj - _start, 0)], hist.index[_tb].strftime(fmt)], y=[_old, _old], mode="lines",
+                                         line=dict(color=_clr, width=1.5, dash="dot"), hoverinfo="skip", showlegend=False), row=1, col=1)
     # preview for the LATEST bar: the 20-bar lower channel extended left to the old low (what you would measure by hand)
     _lr = hist.iloc[-1]
     if np.isfinite(_lr.get("DCX_past", np.nan)):
